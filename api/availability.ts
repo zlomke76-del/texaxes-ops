@@ -22,14 +22,16 @@ type CapacityRow = {
 };
 
 function setCors(req: any, res: any) {
-  const allowedOrigins = [
-    process.env.FRONTEND_URL,
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-  ].filter(Boolean);
+  const origin = req.headers.origin || "";
+  const frontendUrl = process.env.FRONTEND_URL || "";
 
-  const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin)) {
+  const isAllowed =
+    origin === frontendUrl ||
+    origin.includes("vercel.app") ||
+    origin.includes("localhost") ||
+    origin.includes("127.0.0.1");
+
+  if (isAllowed) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
 
