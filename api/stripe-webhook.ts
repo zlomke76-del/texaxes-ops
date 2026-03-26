@@ -130,6 +130,40 @@ async function markBookingPaid(
   });
 }
 
+async function markLeagueRegistrationPaid(
+  registrationId: string,
+  paymentIntentId: string,
+  checkoutSessionId: string | null,
+  amountReceivedCents: number
+): Promise<void> {
+  const amountReceived = amountReceivedCents / 100;
+
+  const { error } = await supabase
+    .schema("texaxes")
+    .from("league_registrations")
+    .update({
+      status: "paid",
+      payment_status: "paid",
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_checkout_session_id: checkoutSessionId,
+      paid_at: new Date().toISOString(),
+      total_amount_paid: amountReceived,
+    })
+    .eq("id", registrationId)
+    .in("status", ["pending", "awaiting_payment"]);
+
+  if (error) {
+    throw error;
+  }
+
+  await writeAuditLog("league_registration_paid", "league_registration", registrationId, {
+    league_registration_id: registrationId,
+    stripe_payment_intent_id: paymentIntentId,
+    stripe_checkout_session_id: checkoutSessionId,
+    amount_received_cents: amountReceivedCents,
+  });
+}
+
 async function markPaymentFailed(
   bookingId: string | null,
   paymentId: string | null,
@@ -163,6 +197,37 @@ async function markPaymentFailed(
       error: lastPaymentError,
     });
   }
+}
+
+async function markLeagueRegistrationFailed(
+  registrationId: string | null,
+  paymentIntentId: string,
+  checkoutSessionId: string | null,
+  lastPaymentError: string | null
+): Promise<void> {
+  if (!registrationId) return;
+
+  const { error } = await supabase
+    .schema("texaxes")
+    .from("league_registrations")
+    .update({
+      payment_status: "failed",
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_checkout_session_id: checkoutSessionId,
+    })
+    .eq("id", registrationId)
+    .neq("payment_status", "paid");
+
+  if (error) {
+    throw error;
+  }
+
+  await writeAuditLog("league_payment_failed", "league_registration", registrationId, {
+    league_registration_id: registrationId,
+    stripe_payment_intent_id: paymentIntentId,
+    stripe_checkout_session_id: checkoutSessionId,
+    error: lastPaymentError,
+  });
 }
 
 async function expireUnpaidBooking(
@@ -206,6 +271,31 @@ async function expireUnpaidBooking(
   });
 }
 
+async function expireUnpaidLeagueRegistration(
+  registrationId: string,
+  checkoutSessionId: string
+): Promise<void> {
+  const { error } = await supabase
+    .schema("texaxes")
+    .from("league_registrations")
+    .update({
+      status: "expired",
+      payment_status: "void",
+      stripe_checkout_session_id: checkoutSessionId,
+    })
+    .eq("id", registrationId)
+    .in("status", ["pending", "awaiting_payment"]);
+
+  if (error) {
+    throw error;
+  }
+
+  await writeAuditLog("league_registration_expired", "league_registration", registrationId, {
+    league_registration_id: registrationId,
+    stripe_checkout_session_id: checkoutSessionId,
+  });
+}
+
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -236,23 +326,41 @@ export default async function handler(req: any, res: any) {
         const session = event.data.object as Stripe.Checkout.Session;
 
         const bookingId = session.metadata?.booking_id || null;
+        const leagueRegistrationId = session.metadata?.league_registration_id || null;
         const paymentId = session.metadata?.payment_id || null;
+
         const paymentIntentId =
           typeof session.payment_intent === "string"
             ? session.payment_intent
             : session.payment_intent?.id || null;
 
-        if (!bookingId || !paymentIntentId) {
-          return res.status(400).send("Missing booking metadata");
+        if (!paymentIntentId) {
+          return res.status(400).send("Missing payment intent");
         }
 
-        await markBookingPaid(
-          bookingId,
-          paymentId,
-          paymentIntentId,
-          session.id,
-          session.amount_total || 0
-        );
+        if (bookingId) {
+          await markBookingPaid(
+            bookingId,
+            paymentId,
+            paymentIntentId,
+            session.id,
+            session.amount_total || 0
+          );
+        }
+
+        if (leagueRegistrationId) {
+          await markLeagueRegistrationPaid(
+            leagueRegistrationId,
+            paymentIntentId,
+            session.id,
+            session.amount_total || 0
+          );
+        }
+
+        if (!bookingId && !leagueRegistrationId) {
+          return res.status(400).send("Missing booking or league registration metadata");
+        }
+
         break;
       }
 
@@ -260,19 +368,28 @@ export default async function handler(req: any, res: any) {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
 
         const bookingId = paymentIntent.metadata?.booking_id || null;
+        const leagueRegistrationId = paymentIntent.metadata?.league_registration_id || null;
         const paymentId = paymentIntent.metadata?.payment_id || null;
 
-        if (!bookingId) {
-          break;
+        if (bookingId) {
+          await markBookingPaid(
+            bookingId,
+            paymentId,
+            paymentIntent.id,
+            null,
+            paymentIntent.amount_received || paymentIntent.amount || 0
+          );
         }
 
-        await markBookingPaid(
-          bookingId,
-          paymentId,
-          paymentIntent.id,
-          null,
-          paymentIntent.amount_received || paymentIntent.amount || 0
-        );
+        if (leagueRegistrationId) {
+          await markLeagueRegistrationPaid(
+            leagueRegistrationId,
+            paymentIntent.id,
+            null,
+            paymentIntent.amount_received || paymentIntent.amount || 0
+          );
+        }
+
         break;
       }
 
@@ -280,10 +397,17 @@ export default async function handler(req: any, res: any) {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
 
         const bookingId = paymentIntent.metadata?.booking_id || null;
+        const leagueRegistrationId = paymentIntent.metadata?.league_registration_id || null;
         const paymentId = paymentIntent.metadata?.payment_id || null;
         const message = paymentIntent.last_payment_error?.message || null;
 
         await markPaymentFailed(bookingId, paymentId, paymentIntent.id, null, message);
+        await markLeagueRegistrationFailed(
+          leagueRegistrationId,
+          paymentIntent.id,
+          null,
+          message
+        );
         break;
       }
 
@@ -291,11 +415,17 @@ export default async function handler(req: any, res: any) {
         const session = event.data.object as Stripe.Checkout.Session;
 
         const bookingId = session.metadata?.booking_id || null;
+        const leagueRegistrationId = session.metadata?.league_registration_id || null;
         const paymentId = session.metadata?.payment_id || null;
 
         if (bookingId) {
           await expireUnpaidBooking(bookingId, paymentId, session.id);
         }
+
+        if (leagueRegistrationId) {
+          await expireUnpaidLeagueRegistration(leagueRegistrationId, session.id);
+        }
+
         break;
       }
 
