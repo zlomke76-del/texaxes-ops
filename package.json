@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node services/stripe-webhook/index.ts",
-    "start": "node services/stripe-webhook/index.ts"
+    "dev": "node server.ts",
+    "start": "node server.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
