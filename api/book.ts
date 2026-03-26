@@ -487,6 +487,15 @@ export default async function handler(req: any, res: any) {
       return res.status(500).json({ error: "Booking insert failed" });
     }
 
+    const postInsertCapacity = await getCapacityRowForBlock(timeBlock.id);
+    if (postInsertCapacity && postInsertCapacity.bays_open < 0) {
+      await supabase.schema("texaxes").from("bookings").delete().eq("id", booking.id);
+
+      return res.status(409).json({
+        error: "Slot just filled. Please select another time.",
+      });
+    }
+
     if (pricing.addon_lines.length > 0) {
       const addonMap = await getAddonCatalogMap();
 
@@ -514,6 +523,9 @@ export default async function handler(req: any, res: any) {
 
         if (addonError) {
           console.error("booking_addons insert failed", addonError);
+
+          await supabase.schema("texaxes").from("bookings").delete().eq("id", booking.id);
+
           return res.status(500).json({ error: "Booking add-on insert failed" });
         }
       }
@@ -535,6 +547,9 @@ export default async function handler(req: any, res: any) {
 
     if (paymentError || !paymentRow) {
       console.error("payments insert failed", paymentError);
+
+      await supabase.schema("texaxes").from("bookings").delete().eq("id", booking.id);
+
       return res.status(500).json({ error: "Payment record insert failed" });
     }
 
@@ -547,6 +562,14 @@ export default async function handler(req: any, res: any) {
         payment_id: paymentRow.id,
         customer_id: customer.id,
         booking_source: bookingSource,
+      },
+      payment_intent_data: {
+        metadata: {
+          booking_id: booking.id,
+          payment_id: paymentRow.id,
+          customer_id: customer.id,
+          booking_source: bookingSource,
+        },
       },
       line_items: [
         {
