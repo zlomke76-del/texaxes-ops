@@ -1,21 +1,29 @@
 import express from "express";
 import cors from "cors";
 import Stripe from "stripe";
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// =============================
-// CONFIG
-// =============================
 const PORT = process.env.PORT || 3001;
 
+// =============================
+// SERVICES
+// =============================
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
   apiVersion: "2024-06-20",
 });
 
-// Venue config
+const supabase = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
+
+// =============================
+// CONFIG
+// =============================
 const TOTAL_BAYS = 4;
 const PREFERRED_THROWERS_PER_BAY = 4;
 const MAX_THROWERS_PER_BAY = 6;
@@ -23,7 +31,6 @@ const MAX_THROWERS_PER_BAY = 6;
 const PRICE_PER_THROWER = 29;
 const TAX_RATE = 0.0825;
 
-// Add-ons
 const ADDONS = {
   byob: 5,
   wktlKnife: 20,
@@ -36,8 +43,8 @@ const ADDONS = {
 // HOURS
 // =============================
 const HOURS: Record<number, { start: number; end: number } | null> = {
-  0: { start: 12, end: 20 }, // Sunday
-  1: null, // Monday CLOSED
+  0: { start: 12, end: 20 },
+  1: null,
   2: { start: 16, end: 22 },
   3: { start: 16, end: 22 },
   4: { start: 16, end: 22 },
@@ -51,8 +58,8 @@ const HOURS: Record<number, { start: number; end: number } | null> = {
 function getSlotsForDate(dateStr: string) {
   const date = new Date(dateStr);
   const day = date.getDay();
-
   const hours = HOURS[day];
+
   if (!hours) return [];
 
   const slots = [];
@@ -67,15 +74,31 @@ function getSlotsForDate(dateStr: string) {
 }
 
 function computeBayRequirements(throwers: number) {
-  const preferred = Math.ceil(throwers / PREFERRED_THROWERS_PER_BAY);
-  const minimum = Math.ceil(throwers / MAX_THROWERS_PER_BAY);
-  return { preferred, minimum };
+  return {
+    preferred: Math.ceil(throwers / PREFERRED_THROWERS_PER_BAY),
+    minimum: Math.ceil(throwers / MAX_THROWERS_PER_BAY),
+  };
 }
 
-// ⚠️ TEMP: replace with DB query later
-function getOpenBaysForSlot(_date: string, _time: string) {
-  // placeholder: assume empty schedule
-  return TOTAL_BAYS;
+async function getOpenBaysForSlot(date: string, time: string) {
+  const { data, error } = await supabase
+    .from("bookings")
+    .select("bays_used, status")
+    .eq("date", date)
+    .eq("time", time);
+
+  if (error) {
+    console.error("Supabase error:", error);
+    throw new Error("DB error");
+  }
+
+  const usedBays = (data || [])
+    .filter((b) =>
+      ["paid", "awaiting_payment", "reserved"].includes(b.status)
+    )
+    .reduce((sum, b) => sum + (b.bays_used || 0), 0);
+
+  return TOTAL_BAYS - usedBays;
 }
 
 function computePrice(payload: any) {
@@ -107,19 +130,25 @@ app.get("/availability", async (req, res) => {
 
     const slots = getSlotsForDate(date);
 
-    const result = slots.map((slot) => {
-      const openBays = getOpenBaysForSlot(date, slot.start);
+    const results = [];
+
+    for (const slot of slots) {
+      const openBays = await getOpenBaysForSlot(date, slot.start);
 
       if (!throwers) {
-        return {
+        results.push({
           ...slot,
           open_bays: openBays,
-        };
+        });
+        continue;
       }
 
-      const { preferred, minimum } = computeBayRequirements(Number(throwers));
+      const { preferred, minimum } = computeBayRequirements(
+        Number(throwers)
+      );
 
       let state = "available";
+
       if (openBays >= preferred) {
         state = "available";
       } else if (openBays >= minimum) {
@@ -128,19 +157,19 @@ app.get("/availability", async (req, res) => {
         state = "full";
       }
 
-      return {
+      results.push({
         ...slot,
         open_bays: openBays,
         preferred_bays_required: preferred,
         minimum_bays_required: minimum,
         state,
-      };
-    });
+      });
+    }
 
     res.json({
       date,
       throwers: throwers || null,
-      slots: result,
+      slots: results,
     });
   } catch (err) {
     console.error(err);
@@ -154,7 +183,6 @@ app.get("/availability", async (req, res) => {
 app.post("/book", async (req, res) => {
   try {
     const payload = req.body;
-
     const { date, time, throwers } = payload;
 
     if (!date || !time || !throwers) {
@@ -163,31 +191,53 @@ app.post("/book", async (req, res) => {
 
     if (throwers > 24) {
       return res.status(400).json({
-        error: "Group too large. Please contact for full venue booking.",
+        error: "Group too large. Contact for full venue booking.",
       });
     }
 
     const slots = getSlotsForDate(date);
-    const validSlot = slots.find((s) => s.start === time);
-
-    if (!validSlot) {
-      return res.status(400).json({ error: "Invalid time slot" });
+    if (!slots.find((s) => s.start === time)) {
+      return res.status(400).json({ error: "Invalid slot" });
     }
 
-    const openBays = getOpenBaysForSlot(date, time);
+    const openBays = await getOpenBaysForSlot(date, time);
 
     const { preferred, minimum } = computeBayRequirements(throwers);
 
     if (openBays < minimum) {
       return res.status(400).json({
-        error: "Slot not available",
+        error: "Slot no longer available",
       });
     }
 
+    const baysUsed = openBays >= preferred ? preferred : minimum;
+
     const pricing = computePrice(payload);
 
-    // ⚠️ TODO: persist booking in DB (Supabase)
+    // =============================
+    // INSERT BOOKING
+    // =============================
+    const { data: booking, error: insertError } = await supabase
+      .from("bookings")
+      .insert({
+        date,
+        time,
+        throwers,
+        bays_used: baysUsed,
+        status: "awaiting_payment",
+        total_amount: pricing.total,
+      })
+      .select()
+      .single();
 
+    if (insertError) {
+      console.error(insertError);
+      return res.status(500).json({ error: "Booking insert failed" });
+    }
+
+    // =============================
+    // STRIPE
+    // =============================
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -203,11 +253,15 @@ app.post("/book", async (req, res) => {
           quantity: 1,
         },
       ],
+      metadata: {
+        booking_id: booking.id,
+      },
       success_url: `${process.env.FRONTEND_URL}/success`,
       cancel_url: `${process.env.FRONTEND_URL}/cancel`,
     });
 
     res.json({
+      booking_id: booking.id,
       checkout_url: session.url,
     });
   } catch (err) {
