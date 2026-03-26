@@ -94,8 +94,25 @@ type PricingResult = {
   }>;
 };
 
+function setCors(req: any, res: any) {
+  const allowedOrigins = [
+    process.env.FRONTEND_URL,
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+  ].filter(Boolean);
+
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
 function methodNotAllowed(res: any) {
-  res.setHeader("Allow", "POST");
+  res.setHeader("Allow", "POST, OPTIONS");
   return res.status(405).json({ error: "Method not allowed" });
 }
 
@@ -271,13 +288,8 @@ async function findExistingCustomer(
       .limit(1)
       .maybeSingle<CustomerRow>();
 
-    if (error) {
-      throw error;
-    }
-
-    if (data) {
-      return data;
-    }
+    if (error) throw error;
+    if (data) return data;
   }
 
   if (normalizedPhone) {
@@ -289,13 +301,8 @@ async function findExistingCustomer(
       .limit(1)
       .maybeSingle<CustomerRow>();
 
-    if (error) {
-      throw error;
-    }
-
-    if (data) {
-      return data;
-    }
+    if (error) throw error;
+    if (data) return data;
   }
 
   return null;
@@ -305,9 +312,7 @@ async function findOrCreateCustomer(
   customer: BookingPayload["customer"]
 ): Promise<CustomerRow> {
   const existing = await findExistingCustomer(customer.email, customer.phone);
-  if (existing) {
-    return existing;
-  }
+  if (existing) return existing;
 
   const { data, error } = await supabase
     .schema("texaxes")
@@ -341,10 +346,7 @@ async function getTimeBlock(date: string, time: string): Promise<TimeBlockRow | 
     .eq("start_time", time)
     .maybeSingle<TimeBlockRow>();
 
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data ?? null;
 }
 
@@ -358,10 +360,7 @@ async function getCapacityRowForBlock(timeBlockId: string): Promise<CapacityRow 
     .eq("time_block_id", timeBlockId)
     .maybeSingle<CapacityRow>();
 
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data ?? null;
 }
 
@@ -372,9 +371,7 @@ async function getAddonCatalogMap(): Promise<Map<string, string>> {
     .select("id, code")
     .eq("active", true);
 
-  if (error) {
-    throw error;
-  }
+  if (error) throw error;
 
   const out = new Map<string, string>();
   for (const row of data || []) {
@@ -384,6 +381,12 @@ async function getAddonCatalogMap(): Promise<Map<string, string>> {
 }
 
 export default async function handler(req: any, res: any) {
+  setCors(req, res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return methodNotAllowed(res);
   }
@@ -523,9 +526,7 @@ export default async function handler(req: any, res: any) {
 
         if (addonError) {
           console.error("booking_addons insert failed", addonError);
-
           await supabase.schema("texaxes").from("bookings").delete().eq("id", booking.id);
-
           return res.status(500).json({ error: "Booking add-on insert failed" });
         }
       }
@@ -547,9 +548,7 @@ export default async function handler(req: any, res: any) {
 
     if (paymentError || !paymentRow) {
       console.error("payments insert failed", paymentError);
-
       await supabase.schema("texaxes").from("bookings").delete().eq("id", booking.id);
-
       return res.status(500).json({ error: "Payment record insert failed" });
     }
 
