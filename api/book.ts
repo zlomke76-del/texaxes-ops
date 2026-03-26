@@ -95,14 +95,14 @@ type PricingResult = {
 };
 
 function setCors(req: any, res: any) {
-  const allowedOrigins = [
-    process.env.FRONTEND_URL,
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-  ].filter(Boolean);
+  const origin = req.headers.origin || "";
 
-  const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin)) {
+  // Allow all Vercel deployments + local dev
+  if (
+    origin.includes("vercel.app") ||
+    origin.includes("localhost") ||
+    origin.includes("127.0.0.1")
+  ) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
 
