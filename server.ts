@@ -4,7 +4,13 @@ import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3001);
@@ -124,6 +130,49 @@ type PricingResult = {
   }>;
 };
 
+type AdminBookingStatus =
+  | "pending"
+  | "awaiting_payment"
+  | "confirmed"
+  | "paid"
+  | "checked_in"
+  | "completed"
+  | "expired"
+  | "no_show";
+
+type AdminPaymentStatus = "pending" | "paid" | "failed" | "void";
+
+type TodayBookingRow = {
+  booking_id: string;
+  start_time: string;
+  end_time: string;
+  customer_name: string;
+  email: string | null;
+  phone: string | null;
+  party_size: number;
+  booking_type: string | null;
+  booking_source: string | null;
+  booking_status: string;
+  payment_status: string;
+  waiver_status: string;
+  total_amount: number;
+  amount_paid: number;
+  customer_notes: string | null;
+  internal_notes: string | null;
+  allocation_mode: string | null;
+  bays_allocated: number | null;
+  created_at: string | null;
+};
+
+type AdminUpdatePayload = {
+  booking_id: string;
+  booking_status?: AdminBookingStatus;
+  payment_status?: AdminPaymentStatus;
+  amount_paid?: number;
+  internal_notes?: string;
+  party_size?: number;
+};
+
 // ======================================================
 // HELPERS
 // ======================================================
@@ -162,6 +211,12 @@ function computeBayRequirements(throwers: number) {
 
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function getTodayLocalDate(): string {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
 }
 
 function computePricing(payload: BookingPayload): PricingResult {
@@ -392,6 +447,25 @@ async function getAddonCatalogMap(): Promise<Map<string, string>> {
   return map;
 }
 
+async function getLatestPaymentByBookingId(
+  bookingId: string
+): Promise<{ id: string; status: string | null; amount: number | null } | null> {
+  const { data, error } = await supabase
+    .schema("texaxes")
+    .from("payments")
+    .select("id, status, amount")
+    .eq("booking_id", bookingId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data ?? null;
+}
+
 // ======================================================
 // HEALTH
 // ======================================================
@@ -479,6 +553,271 @@ app.get("/availability", async (req, res) => {
   } catch (error) {
     console.error("GET /availability failed", error);
     return res.status(500).json({ error: "Availability failed" });
+  }
+});
+
+// ======================================================
+// ADMIN TODAY BOARD
+// GET /api/admin/bookings-today
+// ======================================================
+app.get("/api/admin/bookings-today", async (req, res) => {
+  try {
+    const queryDate = req.query.date ? String(req.query.date) : getTodayLocalDate();
+    const date = normalizeDate(queryDate);
+
+    const { data: blockRows, error: blockError } = await supabase
+      .schema("texaxes")
+      .from("time_blocks")
+      .select("id, block_date, start_time, end_time")
+      .eq("block_date", date)
+      .order("start_time", { ascending: true });
+
+    if (blockError) {
+      throw blockError;
+    }
+
+    const timeBlocks = (blockRows || []) as Array<{
+      id: string;
+      block_date: string;
+      start_time: string;
+      end_time: string;
+    }>;
+
+    const blockMap = new Map(timeBlocks.map((block) => [block.id, block]));
+    const blockIds = timeBlocks.map((block) => block.id);
+
+    if (!blockIds.length) {
+      return res.json({
+        date,
+        summary: {
+          booking_count: 0,
+          paid_count: 0,
+          unpaid_count: 0,
+          checked_in_count: 0,
+          completed_count: 0,
+          expected_revenue: 0,
+          collected_revenue: 0,
+        },
+        bookings: [],
+      });
+    }
+
+    const { data: bookingRows, error: bookingError } = await supabase
+      .schema("texaxes")
+      .from("bookings")
+      .select(
+        "id, customer_id, booking_source, booking_type, status, start_block_id, party_size, bays_allocated, allocation_mode, total_amount, waiver_status, customer_notes, internal_notes, created_at"
+      )
+      .in("start_block_id", blockIds)
+      .order("created_at", { ascending: true });
+
+    if (bookingError) {
+      throw bookingError;
+    }
+
+    const bookings = bookingRows || [];
+    const bookingIds = bookings.map((row) => row.id);
+    const customerIds = [
+      ...new Set(bookings.map((row) => row.customer_id).filter(Boolean)),
+    ];
+
+    const [{ data: customerRows, error: customerError }, { data: paymentRows, error: paymentError }] =
+      await Promise.all([
+        supabase
+          .schema("texaxes")
+          .from("customers")
+          .select("id, first_name, last_name, email, phone")
+          .in("id", customerIds),
+        supabase
+          .schema("texaxes")
+          .from("payments")
+          .select("id, booking_id, status, amount, created_at")
+          .in("booking_id", bookingIds)
+          .order("created_at", { ascending: false }),
+      ]);
+
+    if (customerError) {
+      throw customerError;
+    }
+
+    if (paymentError) {
+      throw paymentError;
+    }
+
+    const customerMap = new Map(
+      (customerRows || []).map((row) => [row.id, row])
+    );
+
+    const latestPaymentMap = new Map<
+      string,
+      { id: string; booking_id: string; status: string | null; amount: number | null; created_at: string | null }
+    >();
+
+    for (const row of paymentRows || []) {
+      if (!latestPaymentMap.has(row.booking_id)) {
+        latestPaymentMap.set(row.booking_id, row);
+      }
+    }
+
+    const rows: TodayBookingRow[] = bookings
+      .map((booking) => {
+        const customer = customerMap.get(booking.customer_id);
+        const payment = latestPaymentMap.get(booking.id);
+        const block = blockMap.get(booking.start_block_id);
+
+        return {
+          booking_id: booking.id,
+          start_time: block?.start_time || "00:00:00",
+          end_time: block?.end_time || "00:00:00",
+          customer_name: customer
+            ? `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || "Unknown Customer"
+            : "Unknown Customer",
+          email: customer?.email || null,
+          phone: customer?.phone || null,
+          party_size: Number(booking.party_size || 0),
+          booking_type: booking.booking_type || null,
+          booking_source: booking.booking_source || null,
+          booking_status: booking.status || "unknown",
+          payment_status: payment?.status || "unknown",
+          waiver_status: booking.waiver_status || "unknown",
+          total_amount: Number(booking.total_amount || 0),
+          amount_paid:
+            payment?.status === "paid" ? Number(payment.amount || 0) : 0,
+          customer_notes: booking.customer_notes || null,
+          internal_notes: booking.internal_notes || null,
+          allocation_mode: booking.allocation_mode || null,
+          bays_allocated:
+            booking.bays_allocated === null || booking.bays_allocated === undefined
+              ? null
+              : Number(booking.bays_allocated),
+          created_at: booking.created_at || null,
+        };
+      })
+      .sort((a, b) => a.start_time.localeCompare(b.start_time));
+
+    const summary = {
+      booking_count: rows.length,
+      paid_count: rows.filter((row) => row.payment_status === "paid").length,
+      unpaid_count: rows.filter((row) => row.payment_status !== "paid").length,
+      checked_in_count: rows.filter((row) => row.booking_status === "checked_in").length,
+      completed_count: rows.filter((row) => row.booking_status === "completed").length,
+      expected_revenue: roundMoney(
+        rows.reduce((sum, row) => sum + Number(row.total_amount || 0), 0)
+      ),
+      collected_revenue: roundMoney(
+        rows.reduce((sum, row) => sum + Number(row.amount_paid || 0), 0)
+      ),
+    };
+
+    return res.json({
+      date,
+      summary,
+      bookings: rows,
+    });
+  } catch (error) {
+    console.error("GET /api/admin/bookings-today failed", error);
+    return res.status(500).json({ error: "Failed to load today bookings" });
+  }
+});
+
+// ======================================================
+// ADMIN UPDATE BOOKING
+// POST /api/admin/update-booking
+// ======================================================
+app.post("/api/admin/update-booking", async (req, res) => {
+  try {
+    const payload = req.body as AdminUpdatePayload;
+
+    if (!payload?.booking_id) {
+      return res.status(400).json({ error: "Missing booking_id" });
+    }
+
+    const bookingUpdates: Record<string, unknown> = {};
+    const paymentUpdates: Record<string, unknown> = {};
+
+    if (payload.booking_status) {
+      bookingUpdates.status = payload.booking_status;
+    }
+
+    if (typeof payload.internal_notes === "string") {
+      bookingUpdates.internal_notes = payload.internal_notes;
+    }
+
+    if (payload.party_size !== undefined) {
+      const size = Number(payload.party_size);
+      if (!Number.isInteger(size) || size <= 0) {
+        return res.status(400).json({ error: "Invalid party_size" });
+      }
+      if (size > PUBLIC_MAX_PARTY_SIZE) {
+        return res.status(400).json({
+          error: "Group too large for public booking. Contact Tex Axes for a full venue booking.",
+        });
+      }
+      bookingUpdates.party_size = size;
+    }
+
+    if (payload.payment_status) {
+      paymentUpdates.status = payload.payment_status;
+      if (payload.payment_status === "paid") {
+        paymentUpdates.paid_at = new Date().toISOString();
+      }
+    }
+
+    if (payload.amount_paid !== undefined) {
+      const amount = Number(payload.amount_paid);
+      if (!Number.isFinite(amount) || amount < 0) {
+        return res.status(400).json({ error: "Invalid amount_paid" });
+      }
+      paymentUpdates.amount = roundMoney(amount);
+    }
+
+    if (Object.keys(bookingUpdates).length > 0) {
+      const { error } = await supabase
+        .schema("texaxes")
+        .from("bookings")
+        .update(bookingUpdates)
+        .eq("id", payload.booking_id);
+
+      if (error) {
+        throw error;
+      }
+    }
+
+    if (Object.keys(paymentUpdates).length > 0) {
+      const paymentRow = await getLatestPaymentByBookingId(payload.booking_id);
+
+      if (paymentRow?.id) {
+        const { error } = await supabase
+          .schema("texaxes")
+          .from("payments")
+          .update(paymentUpdates)
+          .eq("id", paymentRow.id);
+
+        if (error) {
+          throw error;
+        }
+      }
+    }
+
+    await writeAuditLog(
+      "booking_admin_updated",
+      "booking",
+      payload.booking_id,
+      {
+        booking_id: payload.booking_id,
+        booking_updates: bookingUpdates,
+        payment_updates: paymentUpdates,
+      },
+      "admin"
+    );
+
+    return res.json({
+      success: true,
+      booking_id: payload.booking_id,
+    });
+  } catch (error) {
+    console.error("POST /api/admin/update-booking failed", error);
+    return res.status(500).json({ error: "Failed to update booking" });
   }
 });
 
