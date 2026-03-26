@@ -1,5 +1,4 @@
 import express from "express";
-import cors from "cors";
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 
@@ -12,27 +11,29 @@ const ALLOWED_ORIGINS = [
   "http://localhost:3000",
 ];
 
-const corsMiddleware = cors({
-  origin(origin, callback) {
-    if (!origin) {
-      callback(null, true);
-      return;
-    }
+/**
+ * Deterministic CORS handling for Vercel + browser preflight.
+ * This replaces reliance on generic cors() behavior so OPTIONS always exits cleanly.
+ */
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
 
-    if (ALLOWED_ORIGINS.includes(origin)) {
-      callback(null, true);
-      return;
-    }
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
 
-    callback(null, false);
-  },
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: false,
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  return next();
 });
 
-app.use(corsMiddleware);
-app.options("*", corsMiddleware);
 app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3001);
