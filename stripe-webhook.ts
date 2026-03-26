@@ -5,7 +5,7 @@ import bodyParser from "body-parser";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
   apiVersion: "2023-10-16",
 });
 
