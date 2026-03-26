@@ -140,8 +140,11 @@ export default async function handler(req: any, res: any) {
       throwers: partySize,
       slots,
     });
-  } catch (error) {
-    console.error("GET /api/availability failed", error);
-    return res.status(500).json({ error: "Availability failed" });
-  }
+ } catch (error: any) {
+  console.error("GET /api/availability failed", error);
+
+  return res.status(500).json({
+    error: "Availability failed",
+    details: error?.message || String(error),
+  });
 }
