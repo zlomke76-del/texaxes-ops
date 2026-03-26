@@ -4,13 +4,35 @@ import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+
+const ALLOWED_ORIGINS = [
+  "https://texaxes-ui.vercel.app",
+  "https://texaxes-ui-git-main-tim-zlomkes-projects.vercel.app",
+  "https://texaxes-ui-git-main-zlomke76-del.vercel.app",
+  "http://localhost:3000",
+];
+
+const corsMiddleware = cors({
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(null, false);
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: false,
+});
+
+app.use(corsMiddleware);
+app.options("*", corsMiddleware);
 app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3001);
