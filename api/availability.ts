@@ -21,8 +21,25 @@ type CapacityRow = {
   bays_open: number;
 };
 
+function setCors(req: any, res: any) {
+  const allowedOrigins = [
+    process.env.FRONTEND_URL,
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+  ].filter(Boolean);
+
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
 function methodNotAllowed(res: any) {
-  res.setHeader("Allow", "GET");
+  res.setHeader("Allow", "GET, OPTIONS");
   return res.status(405).json({ error: "Method not allowed" });
 }
 
@@ -49,6 +66,12 @@ function computeBayRequirements(throwers: number) {
 }
 
 export default async function handler(req: any, res: any) {
+  setCors(req, res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "GET") {
     return methodNotAllowed(res);
   }
@@ -140,11 +163,12 @@ export default async function handler(req: any, res: any) {
       throwers: partySize,
       slots,
     });
- } catch (error: any) {
-  console.error("GET /api/availability failed", error);
+  } catch (error: any) {
+    console.error("GET /api/availability failed", error);
 
-  return res.status(500).json({
-    error: "Availability failed",
-    details: error?.message || String(error),
-  });
+    return res.status(500).json({
+      error: "Availability failed",
+      details: error?.message || String(error),
+    });
+  }
 }
