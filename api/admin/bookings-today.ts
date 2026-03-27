@@ -6,6 +6,13 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+type WaiverStatus =
+  | "complete"
+  | "partial"
+  | "missing"
+  | "expired"
+  | "guardian_required";
+
 function setCors(req: VercelRequest, res: VercelResponse) {
   const origin = req.headers.origin || "";
   res.setHeader("Access-Control-Allow-Origin", origin);
@@ -26,6 +33,25 @@ function normalizeDate(input?: string) {
   return input;
 }
 
+function toStartOfDayIso(date: string) {
+  return `${date}T00:00:00.000Z`;
+}
+
+function getWaiverStatus(args: {
+  required: number;
+  signed: number;
+  expired: number;
+  guardianRequired: number;
+}): WaiverStatus {
+  const { required, signed, expired, guardianRequired } = args;
+
+  if (guardianRequired > 0) return "guardian_required";
+  if (signed >= required && required > 0) return "complete";
+  if (signed > 0) return "partial";
+  if (expired > 0) return "expired";
+  return "missing";
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCors(req, res);
 
@@ -40,9 +66,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const date = normalizeDate(req.query.date as string);
 
-    /**
-     * Pull bookings + customer info
-     */
     const { data, error } = await supabase
       .schema("texaxes")
       .from("bookings")
@@ -85,9 +108,75 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(500).json({ error: "Failed to fetch bookings" });
     }
 
-    const bookings = (data || []).map((row: any) => {
+    const rows = data || [];
+    const bookingIds = rows.map((row: any) => row.id);
+
+    let waiverCounts = new Map<
+      string,
+      {
+        signed: number;
+        expired: number;
+        guardianRequired: number;
+      }
+    >();
+
+    if (bookingIds.length > 0) {
+      const { data: waiverRows, error: waiverError } = await supabase
+        .schema("texaxes")
+        .from("waivers")
+        .select("booking_id, expires_at, is_minor, guardian_customer_id")
+        .in("booking_id", bookingIds);
+
+      if (waiverError) {
+        console.error("bookings-today waiver query error", waiverError);
+        return res.status(500).json({ error: "Failed to fetch waiver data" });
+      }
+
+      const validOnOrAfter = new Date(toStartOfDayIso(date));
+
+      for (const waiver of waiverRows || []) {
+        const bookingId = waiver.booking_id as string | null;
+        if (!bookingId) continue;
+
+        const current = waiverCounts.get(bookingId) || {
+          signed: 0,
+          expired: 0,
+          guardianRequired: 0,
+        };
+
+        const expiresAt = waiver.expires_at ? new Date(waiver.expires_at) : null;
+        const isExpired = !expiresAt || expiresAt < validOnOrAfter;
+        const needsGuardian = Boolean(waiver.is_minor) && !waiver.guardian_customer_id;
+
+        if (needsGuardian) {
+          current.guardianRequired += 1;
+        } else if (isExpired) {
+          current.expired += 1;
+        } else {
+          current.signed += 1;
+        }
+
+        waiverCounts.set(bookingId, current);
+      }
+    }
+
+    const bookings = rows.map((row: any) => {
       const customer = row.customers || {};
       const block = row.time_blocks || {};
+      const requiredWaivers = Number(row.party_size || 0);
+
+      const waiverCount = waiverCounts.get(row.id) || {
+        signed: 0,
+        expired: 0,
+        guardianRequired: 0,
+      };
+
+      const waiverStatus = getWaiverStatus({
+        required: requiredWaivers,
+        signed: waiverCount.signed,
+        expired: waiverCount.expired,
+        guardianRequired: waiverCount.guardianRequired,
+      });
 
       return {
         booking_id: row.id,
@@ -106,12 +195,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         booking_status: row.status,
         payment_status:
-          row.amount_paid >= row.total_amount ? "paid" : "pending",
+          Number(row.amount_paid || 0) >= Number(row.total_amount || 0)
+            ? "paid"
+            : "pending",
 
-        waiver_status: "missing", // placeholder (hook later)
+        waiver_required: requiredWaivers,
+        waiver_signed: waiverCount.signed,
+        waiver_status: waiverStatus,
         waiver_url: `${process.env.FRONTEND_URL}/waiver?booking=${row.id}`,
 
         total_amount: Number(row.total_amount || 0),
+        tax_amount: Number(row.tax_amount || 0),
         amount_paid: Number(row.amount_paid || 0),
 
         customer_notes: row.customer_notes,
@@ -128,9 +222,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       };
     });
 
-    /**
-     * Summary
-     */
     const expected = bookings.reduce((sum, b) => sum + b.total_amount, 0);
     const collected = bookings.reduce((sum, b) => sum + b.amount_paid, 0);
 
@@ -142,6 +233,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       completed_count: bookings.filter((b) => b.booking_status === "completed").length,
       expected_revenue: expected,
       collected_revenue: collected,
+      waiver_complete_count: bookings.filter((b) => b.waiver_status === "complete").length,
+      waiver_partial_count: bookings.filter((b) => b.waiver_status === "partial").length,
+      waiver_missing_count: bookings.filter((b) => b.waiver_status === "missing").length,
     };
 
     return res.status(200).json({
