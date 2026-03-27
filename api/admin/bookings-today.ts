@@ -16,6 +16,7 @@ type WaiverStatus =
 function setCors(req: VercelRequest, res: VercelResponse) {
   const origin = req.headers.origin || "";
   res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
@@ -35,6 +36,10 @@ function normalizeDate(input?: string) {
 
 function toStartOfDayIso(date: string) {
   return `${date}T00:00:00.000Z`;
+}
+
+function roundMoney(value: number) {
+  return Math.round(value * 100) / 100;
 }
 
 function getWaiverStatus(args: {
@@ -66,7 +71,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const date = normalizeDate(req.query.date as string);
 
-    const { data, error } = await supabase
+    const { data: timeBlocks, error: timeBlocksError } = await supabase
+      .schema("texaxes")
+      .from("time_blocks")
+      .select("id, block_date, start_time, end_time")
+      .eq("block_date", date)
+      .order("start_time", { ascending: true });
+
+    if (timeBlocksError) {
+      console.error("bookings-today time_blocks query error", JSON.stringify(timeBlocksError, null, 2));
+      return res.status(500).json({ error: "Failed to fetch time blocks" });
+    }
+
+    const blocks = timeBlocks || [];
+    const blockMap = new Map<string, any>(blocks.map((block: any) => [block.id, block]));
+    const blockIds = blocks.map((block: any) => block.id);
+
+    if (blockIds.length === 0) {
+      return res.status(200).json({
+        date,
+        summary: {
+          booking_count: 0,
+          paid_count: 0,
+          unpaid_count: 0,
+          checked_in_count: 0,
+          completed_count: 0,
+          expected_revenue: 0,
+          collected_revenue: 0,
+          waiver_complete_count: 0,
+          waiver_partial_count: 0,
+          waiver_missing_count: 0,
+        },
+        bookings: [],
+      });
+    }
+
+    const { data: bookingRows, error: bookingsError } = await supabase
       .schema("texaxes")
       .from("bookings")
       .select(`
@@ -87,32 +127,57 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         tax_exempt,
         tax_exempt_reason,
         tax_exempt_status,
-        created_at,
-        customers (
-          first_name,
-          last_name,
-          email,
-          phone
-        ),
-        time_blocks!inner (
-          block_date,
-          start_time,
-          end_time
-        )
+        created_at
       `)
-      .eq("time_blocks.block_date", date)
-      .order("start_time", {
-        referencedTable: "time_blocks",
-        ascending: true,
-      });
+      .in("start_block_id", blockIds)
+      .order("created_at", { ascending: true });
 
-    if (error) {
-      console.error("bookings-today query error", JSON.stringify(error, null, 2));
+    if (bookingsError) {
+      console.error("bookings-today bookings query error", JSON.stringify(bookingsError, null, 2));
       return res.status(500).json({ error: "Failed to fetch bookings" });
     }
 
-    const rows = data || [];
+    const rows = bookingRows || [];
+
+    if (rows.length === 0) {
+      return res.status(200).json({
+        date,
+        summary: {
+          booking_count: 0,
+          paid_count: 0,
+          unpaid_count: 0,
+          checked_in_count: 0,
+          completed_count: 0,
+          expected_revenue: 0,
+          collected_revenue: 0,
+          waiver_complete_count: 0,
+          waiver_partial_count: 0,
+          waiver_missing_count: 0,
+        },
+        bookings: [],
+      });
+    }
+
     const bookingIds = rows.map((row: any) => row.id);
+    const customerIds = [...new Set(rows.map((row: any) => row.customer_id).filter(Boolean))];
+
+    const customerMap = new Map<string, any>();
+    if (customerIds.length > 0) {
+      const { data: customerRows, error: customersError } = await supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id, first_name, last_name, email, phone")
+        .in("id", customerIds);
+
+      if (customersError) {
+        console.error("bookings-today customers query error", JSON.stringify(customersError, null, 2));
+        return res.status(500).json({ error: "Failed to fetch customers" });
+      }
+
+      for (const customer of customerRows || []) {
+        customerMap.set(customer.id, customer);
+      }
+    }
 
     const waiverCounts = new Map<
       string,
@@ -163,70 +228,84 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    const bookings = rows.map((row: any) => {
-      const customer = Array.isArray(row.customers) ? row.customers[0] || {} : row.customers || {};
-      const block = Array.isArray(row.time_blocks) ? row.time_blocks[0] || {} : row.time_blocks || {};
-      const requiredWaivers = Number(row.party_size || 0);
+    const frontendUrl = (process.env.FRONTEND_URL || "").replace(/\/+$/, "");
 
-      const waiverCount = waiverCounts.get(row.id) || {
-        signed: 0,
-        expired: 0,
-        guardianRequired: 0,
-      };
+    const bookings = rows
+      .map((row: any) => {
+        const customer = customerMap.get(row.customer_id) || {};
+        const block = blockMap.get(row.start_block_id) || {};
+        const requiredWaivers = Math.max(0, Number(row.party_size || 0));
 
-      const waiverStatus = getWaiverStatus({
-        required: requiredWaivers,
-        signed: waiverCount.signed,
-        expired: waiverCount.expired,
-        guardianRequired: waiverCount.guardianRequired,
+        const waiverCount = waiverCounts.get(row.id) || {
+          signed: 0,
+          expired: 0,
+          guardianRequired: 0,
+        };
+
+        const waiverStatus = getWaiverStatus({
+          required: requiredWaivers,
+          signed: waiverCount.signed,
+          expired: waiverCount.expired,
+          guardianRequired: waiverCount.guardianRequired,
+        });
+
+        return {
+          booking_id: row.id,
+          customer_id: row.customer_id,
+
+          start_time: block.start_time || null,
+          end_time: block.end_time || null,
+
+          customer_name: `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || "Unknown Customer",
+          email: customer.email || null,
+          phone: customer.phone || null,
+
+          party_size: Number(row.party_size || 0),
+          booking_type: row.booking_type || null,
+          booking_source: row.booking_source || null,
+
+          booking_status: row.status || "pending",
+          payment_status:
+            Number(row.amount_paid || 0) >= Number(row.total_amount || 0) &&
+            Number(row.total_amount || 0) > 0
+              ? "paid"
+              : "pending",
+
+          waiver_required: requiredWaivers,
+          waiver_signed: waiverCount.signed,
+          waiver_status: waiverStatus,
+          waiver_url: frontendUrl
+            ? `${frontendUrl}/waiver?booking_id=${row.id}&customer_id=${row.customer_id}`
+            : null,
+
+          total_amount: Number(row.total_amount || 0),
+          tax_amount: Number(row.tax_amount || 0),
+          amount_paid: Number(row.amount_paid || 0),
+
+          customer_notes: row.customer_notes || null,
+          internal_notes: row.internal_notes || null,
+
+          allocation_mode: row.allocation_mode || null,
+          bays_allocated:
+            row.bays_allocated === null || row.bays_allocated === undefined
+              ? null
+              : Number(row.bays_allocated),
+
+          tax_exempt: row.tax_exempt ?? null,
+          tax_exempt_reason: row.tax_exempt_reason || null,
+          tax_exempt_status: row.tax_exempt_status || null,
+
+          created_at: row.created_at || null,
+        };
+      })
+      .sort((a, b) => {
+        const aTime = a.start_time || "";
+        const bTime = b.start_time || "";
+        return aTime.localeCompare(bTime);
       });
 
-      return {
-        booking_id: row.id,
-        customer_id: row.customer_id,
-
-        start_time: block.start_time,
-        end_time: block.end_time,
-
-        customer_name: `${customer.first_name || ""} ${customer.last_name || ""}`.trim(),
-        email: customer.email,
-        phone: customer.phone,
-
-        party_size: row.party_size,
-        booking_type: row.booking_type,
-        booking_source: row.booking_source,
-
-        booking_status: row.status,
-        payment_status:
-          Number(row.amount_paid || 0) >= Number(row.total_amount || 0)
-            ? "paid"
-            : "pending",
-
-        waiver_required: requiredWaivers,
-        waiver_signed: waiverCount.signed,
-        waiver_status: waiverStatus,
-        waiver_url: `${process.env.FRONTEND_URL}/waiver?booking_id=${row.id}&customer_id=${row.customer_id}`,
-
-        total_amount: Number(row.total_amount || 0),
-        tax_amount: Number(row.tax_amount || 0),
-        amount_paid: Number(row.amount_paid || 0),
-
-        customer_notes: row.customer_notes,
-        internal_notes: row.internal_notes,
-
-        allocation_mode: row.allocation_mode,
-        bays_allocated: row.bays_allocated,
-
-        tax_exempt: row.tax_exempt,
-        tax_exempt_reason: row.tax_exempt_reason,
-        tax_exempt_status: row.tax_exempt_status,
-
-        created_at: row.created_at,
-      };
-    });
-
-    const expected = bookings.reduce((sum, b) => sum + b.total_amount, 0);
-    const collected = bookings.reduce((sum, b) => sum + b.amount_paid, 0);
+    const expected = roundMoney(bookings.reduce((sum, b) => sum + b.total_amount, 0));
+    const collected = roundMoney(bookings.reduce((sum, b) => sum + b.amount_paid, 0));
 
     const summary = {
       booking_count: bookings.length,
@@ -248,6 +327,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   } catch (err: any) {
     console.error("bookings-today failed", err?.message || err, err);
-    return res.status(500).json({ error: err.message || "Server error" });
+    return res.status(500).json({ error: err?.message || "Server error" });
   }
 }
