@@ -1206,13 +1206,13 @@ app.get("/api/admin/bookings-today", async (req, res) => {
     }
 
     const { data: bookingRows, error: bookingError } = await supabase
-      .schema("texaxes")
-      .from("bookings")
-      .select(
-        "id, customer_id, booking_source, booking_type, status, start_block_id, party_size, bays_allocated, allocation_mode, total_amount, tax_amount, customer_notes, internal_notes, created_at, tax_exempt, tax_exempt_reason, tax_exempt_status, tax_exempt_form_collected_at"
-      )
-      .in("start_block_id", blockIds)
-      .order("created_at", { ascending: true });
+  .schema("texaxes")
+  .from("bookings")
+  .select(
+    "id, customer_id, booking_source, booking_type, status, start_block_id, party_size, bays_allocated, allocation_mode, total_amount, tax_amount, customer_notes, internal_notes, created_at"
+  )
+  .in("start_block_id", blockIds)
+  .order("created_at", { ascending: true });
 
     if (bookingError) throw bookingError;
 
@@ -1326,10 +1326,10 @@ app.get("/api/admin/bookings-today", async (req, res) => {
               ? null
               : Number(booking.bays_allocated),
           created_at: booking.created_at || null,
-          tax_exempt: booking.tax_exempt ?? null,
-          tax_exempt_reason: booking.tax_exempt_reason || null,
-          tax_exempt_status: booking.tax_exempt_status || null,
-          tax_exempt_form_collected_at: booking.tax_exempt_form_collected_at || null,
+              tax_exempt: null,
+              tax_exempt_reason: null,
+              tax_exempt_status: null,
+              tax_exempt_form_collected_at: null,
         };
       })
     );
@@ -1928,9 +1928,31 @@ app.get("/api/admin/list-open-tabs", async (req, res) => {
       tabs,
     });
   } catch (error: any) {
-    console.error("GET /api/admin/list-open-tabs failed", error);
-    return res.status(500).json({ error: error?.message || "Failed to load tabs" });
-  }
+  console.error(
+    "GET /api/admin/list-open-tabs failed FULL",
+    JSON.stringify(
+      {
+        message: error?.message || null,
+        details: error?.details || null,
+        hint: error?.hint || null,
+        code: error?.code || null,
+        stack: error?.stack || null,
+      },
+      null,
+      2
+    )
+  );
+
+  return res.status(500).json({
+    error: error?.message || "Failed to load tabs",
+    debug: {
+      message: error?.message || null,
+      details: error?.details || null,
+      hint: error?.hint || null,
+      code: error?.code || null,
+    },
+  });
+}
 });
 
 app.post("/api/admin/add-line-item", async (req, res) => {
@@ -1940,6 +1962,7 @@ app.post("/api/admin/add-line-item", async (req, res) => {
     if (!payload?.tab_id) {
       return res.status(400).json({ error: "tab_id is required" });
     }
+
     if (!payload?.description?.trim()) {
       return res.status(400).json({ error: "description is required" });
     }
@@ -2027,8 +2050,30 @@ app.post("/api/admin/add-line-item", async (req, res) => {
       tab,
     });
   } catch (error: any) {
-    console.error("POST /api/admin/add-line-item failed", error);
-    return res.status(500).json({ error: error?.message || "Failed to add line item" });
+    console.error(
+      "POST /api/admin/add-line-item failed FULL",
+      JSON.stringify(
+        {
+          message: error?.message || null,
+          details: error?.details || null,
+          hint: error?.hint || null,
+          code: error?.code || null,
+          stack: error?.stack || null,
+        },
+        null,
+        2
+      )
+    );
+
+    return res.status(500).json({
+      error: error?.message || "Failed to add line item",
+      debug: {
+        message: error?.message || null,
+        details: error?.details || null,
+        hint: error?.hint || null,
+        code: error?.code || null,
+      },
+    });
   }
 });
 
