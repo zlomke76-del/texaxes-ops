@@ -110,6 +110,27 @@ type BookingPayload = {
   internal_notes?: string;
 };
 
+type AdminCreateBookingPayload = {
+  date: string;
+  time: string;
+  throwers: number;
+  customer: {
+    first_name: string;
+    last_name: string;
+    email?: string | null;
+    phone?: string | null;
+    birth_date?: string | null;
+    is_minor?: boolean;
+    notes?: string | null;
+    marketing_opt_in?: boolean;
+  };
+  booking_source?: "admin" | "phone" | "walk_in" | "corporate";
+  booking_type?: "open" | "league" | "corporate";
+  customer_notes?: string;
+  internal_notes?: string;
+  payment_status?: "pending" | "paid";
+};
+
 type CustomerRow = {
   id: string;
   first_name: string;
@@ -580,8 +601,8 @@ app.get("/availability", async (req, res) => {
 });
 
 // ======================================================
-// ADMIN TODAY BOARD
-// GET /api/admin/bookings-today
+// ADMIN DATE BOARD
+// GET /api/admin/bookings-today?date=YYYY-MM-DD
 // ======================================================
 app.get("/api/admin/bookings-today", async (req, res) => {
   try {
@@ -640,24 +661,24 @@ app.get("/api/admin/bookings-today", async (req, res) => {
 
     const bookings = bookingRows || [];
     const bookingIds = bookings.map((row) => row.id);
-    const customerIds = [
-      ...new Set(bookings.map((row) => row.customer_id).filter(Boolean)),
-    ];
+    const customerIds = [...new Set(bookings.map((row) => row.customer_id).filter(Boolean))];
 
-    const [{ data: customerRows, error: customerError }, { data: paymentRows, error: paymentError }] =
-      await Promise.all([
-        supabase
-          .schema("texaxes")
-          .from("customers")
-          .select("id, first_name, last_name, email, phone")
-          .in("id", customerIds),
-        supabase
-          .schema("texaxes")
-          .from("payments")
-          .select("id, booking_id, status, amount, created_at")
-          .in("booking_id", bookingIds)
-          .order("created_at", { ascending: false }),
-      ]);
+    const [
+      { data: customerRows, error: customerError },
+      { data: paymentRows, error: paymentError },
+    ] = await Promise.all([
+      supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id, first_name, last_name, email, phone")
+        .in("id", customerIds),
+      supabase
+        .schema("texaxes")
+        .from("payments")
+        .select("id, booking_id, status, amount, created_at")
+        .in("booking_id", bookingIds)
+        .order("created_at", { ascending: false }),
+    ]);
 
     if (customerError) {
       throw customerError;
@@ -667,13 +688,17 @@ app.get("/api/admin/bookings-today", async (req, res) => {
       throw paymentError;
     }
 
-    const customerMap = new Map(
-      (customerRows || []).map((row) => [row.id, row])
-    );
+    const customerMap = new Map((customerRows || []).map((row) => [row.id, row]));
 
     const latestPaymentMap = new Map<
       string,
-      { id: string; booking_id: string; status: string | null; amount: number | null; created_at: string | null }
+      {
+        id: string;
+        booking_id: string;
+        status: string | null;
+        amount: number | null;
+        created_at: string | null;
+      }
     >();
 
     for (const row of paymentRows || []) {
@@ -693,7 +718,8 @@ app.get("/api/admin/bookings-today", async (req, res) => {
           start_time: block?.start_time || "00:00:00",
           end_time: block?.end_time || "00:00:00",
           customer_name: customer
-            ? `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || "Unknown Customer"
+            ? `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
+              "Unknown Customer"
             : "Unknown Customer",
           email: customer?.email || null,
           phone: customer?.phone || null,
@@ -704,8 +730,7 @@ app.get("/api/admin/bookings-today", async (req, res) => {
           payment_status: payment?.status || "unknown",
           waiver_status: booking.waiver_status || "unknown",
           total_amount: Number(booking.total_amount || 0),
-          amount_paid:
-            payment?.status === "paid" ? Number(payment.amount || 0) : 0,
+          amount_paid: payment?.status === "paid" ? Number(payment.amount || 0) : 0,
           customer_notes: booking.customer_notes || null,
           internal_notes: booking.internal_notes || null,
           allocation_mode: booking.allocation_mode || null,
@@ -740,6 +765,182 @@ app.get("/api/admin/bookings-today", async (req, res) => {
   } catch (error) {
     console.error("GET /api/admin/bookings-today failed", error);
     return res.status(500).json({ error: "Failed to load today bookings" });
+  }
+});
+
+// ======================================================
+// ADMIN CREATE BOOKING
+// POST /api/admin/create-booking
+// ======================================================
+app.post("/api/admin/create-booking", async (req, res) => {
+  try {
+    const payload = req.body as AdminCreateBookingPayload;
+
+    if (!payload?.date || !payload?.time || !payload?.throwers || !payload?.customer) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    if (!payload.customer.first_name?.trim() || !payload.customer.last_name?.trim()) {
+      return res.status(400).json({ error: "Customer first and last name are required" });
+    }
+
+    const date = normalizeDate(payload.date);
+    const time = normalizeTime(payload.time);
+    const throwers = Number(payload.throwers);
+
+    if (!Number.isInteger(throwers) || throwers <= 0) {
+      return res.status(400).json({ error: "Invalid thrower count" });
+    }
+
+    if (throwers > PUBLIC_MAX_PARTY_SIZE) {
+      return res.status(400).json({
+        error: "Group too large for public booking. Contact Tex Axes for a full venue booking.",
+      });
+    }
+
+    const timeBlock = await getTimeBlock(date, time);
+    if (!timeBlock || !timeBlock.is_open || !timeBlock.is_bookable) {
+      return res.status(400).json({ error: "Invalid or unavailable time slot" });
+    }
+
+    const capacity = await getCapacityRowForBlock(timeBlock.id);
+    if (!capacity) {
+      return res.status(400).json({ error: "Capacity record not found for slot" });
+    }
+
+    const { preferred, minimum } = computeBayRequirements(throwers);
+
+    if (capacity.bays_open < minimum) {
+      return res.status(409).json({
+        error: "Slot no longer available",
+        details: {
+          open_bays: capacity.bays_open,
+          minimum_bays_required: minimum,
+          preferred_bays_required: preferred,
+        },
+      });
+    }
+
+    const allocationMode: "preferred" | "dense" =
+      capacity.bays_open >= preferred ? "preferred" : "dense";
+    const baysAllocated = allocationMode === "preferred" ? preferred : minimum;
+
+    const bookingSource = payload.booking_source || "admin";
+    const bookingType = payload.booking_type || "open";
+    const paymentStatus = payload.payment_status || "pending";
+
+    const customer = await findOrCreateCustomer(payload.customer);
+    const pricing = computePricing({
+      ...payload,
+      booking_source: bookingSource,
+      booking_type: bookingType,
+    } as BookingPayload);
+
+    const waiverStatus = deriveWaiverStatus({
+      ...payload,
+      booking_source: bookingSource,
+      booking_type: bookingType,
+    } as BookingPayload);
+
+    const bookingStatus: AdminBookingStatus =
+      paymentStatus === "paid" ? "paid" : "confirmed";
+
+    const { data: booking, error: bookingError } = await supabase
+      .schema("texaxes")
+      .from("bookings")
+      .insert({
+        customer_id: customer.id,
+        booking_source: bookingSource,
+        booking_type: bookingType,
+        status: bookingStatus,
+        start_block_id: timeBlock.id,
+        block_count: 1,
+        party_size: throwers,
+        bays_allocated: baysAllocated,
+        allocation_mode: allocationMode,
+        base_price: pricing.base_price,
+        addons_subtotal: pricing.addons_subtotal,
+        subtotal: pricing.subtotal,
+        tax_amount: pricing.tax_amount,
+        total_amount: pricing.total_amount,
+        waiver_status: waiverStatus,
+        internal_notes: payload.internal_notes || null,
+        customer_notes: payload.customer_notes || null,
+        created_by: bookingSource,
+      })
+      .select()
+      .single();
+
+    if (bookingError || !booking) {
+      console.error("admin booking insert failed", bookingError);
+      return res.status(500).json({ error: "Booking insert failed" });
+    }
+
+    const amountForPayment = paymentStatus === "paid" ? pricing.total_amount : 0;
+
+    const { data: paymentRow, error: paymentInsertError } = await supabase
+      .schema("texaxes")
+      .from("payments")
+      .insert({
+        booking_id: booking.id,
+        payment_provider: "manual",
+        payment_type: "full",
+        status: paymentStatus,
+        amount: amountForPayment,
+        currency: "usd",
+        paid_at: paymentStatus === "paid" ? new Date().toISOString() : null,
+      })
+      .select()
+      .single();
+
+    if (paymentInsertError || !paymentRow) {
+      console.error("manual payment insert failed", paymentInsertError);
+      return res.status(500).json({ error: "Payment record insert failed" });
+    }
+
+    await writeAuditLog(
+      "booking_admin_created",
+      "booking",
+      booking.id,
+      {
+        booking_id: booking.id,
+        payment_id: paymentRow.id,
+        customer_id: customer.id,
+        time_block_id: timeBlock.id,
+        party_size: throwers,
+        bays_allocated: baysAllocated,
+        allocation_mode: allocationMode,
+        booking_source: bookingSource,
+        booking_type: bookingType,
+        booking_status: bookingStatus,
+        payment_status: paymentStatus,
+        total_amount: pricing.total_amount,
+      },
+      "admin"
+    );
+
+    return res.json({
+      success: true,
+      booking_id: booking.id,
+      booking_status: bookingStatus,
+      payment_status: paymentStatus,
+      totals: {
+        base_price: pricing.base_price,
+        addons_subtotal: pricing.addons_subtotal,
+        subtotal: pricing.subtotal,
+        tax_amount: pricing.tax_amount,
+        total_amount: pricing.total_amount,
+      },
+      allocation: {
+        mode: allocationMode,
+        bays_allocated: baysAllocated,
+        preferred_bays_required: preferred,
+        minimum_bays_required: minimum,
+      },
+    });
+  } catch (error) {
+    console.error("POST /api/admin/create-booking failed", error);
+    return res.status(500).json({ error: "Failed to create booking" });
   }
 });
 
