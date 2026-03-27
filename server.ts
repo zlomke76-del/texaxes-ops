@@ -911,14 +911,13 @@ async function loadTabById(tabId: string) {
         email,
         phone
       ),
-      bookings (
+        bookings (
         id,
         booking_type,
         booking_source,
         status,
         party_size,
         total_amount,
-        amount_paid,
         tax_exempt,
         tax_exempt_reason,
         tax_exempt_status,
