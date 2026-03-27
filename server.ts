@@ -1,5 +1,6 @@
 import express from "express";
 import Stripe from "stripe";
+import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
@@ -38,10 +39,16 @@ app.use(express.json({ limit: "10mb" }));
 
 const PORT = Number(process.env.PORT || 3001);
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+const WAIVER_FROM_EMAIL =
+  process.env.WAIVER_FROM_EMAIL || "Tex Axes <onboarding@resend.dev>";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
   apiVersion: "2024-06-20",
 });
+
+const resend = process.env.RESEND_API_KEY
+  ? new Resend(process.env.RESEND_API_KEY)
+  : null;
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -212,6 +219,11 @@ type AdminUpdatePayload = {
   party_size?: number;
 };
 
+type WaiverEmailResult = {
+  sent: boolean;
+  error: string | null;
+};
+
 // ======================================================
 // HELPERS
 // ======================================================
@@ -328,6 +340,88 @@ function buildWaiverUrl(bookingId: string, customerId: string): string {
   return `${base}/waiver?booking_id=${encodeURIComponent(
     bookingId
   )}&customer_id=${encodeURIComponent(customerId)}`;
+}
+
+async function sendWaiverEmail(params: {
+  to: string | null | undefined;
+  firstName: string;
+  waiverUrl: string;
+  bookingDate?: string;
+  bookingTime?: string;
+}): Promise<WaiverEmailResult> {
+  try {
+    if (!params.to || !params.to.trim()) {
+      return { sent: false, error: "missing_email" };
+    }
+
+    if (!resend) {
+      return { sent: false, error: "resend_not_configured" };
+    }
+
+    const formattedDateTime =
+      params.bookingDate && params.bookingTime
+        ? `${params.bookingDate} at ${params.bookingTime.slice(0, 5)}`
+        : null;
+
+    const subject = "Complete Your Tex Axes Waiver";
+
+    const text = [
+      `Hi ${params.firstName || "there"},`,
+      "",
+      "Your Tex Axes booking is in our system.",
+      formattedDateTime ? `Booking time: ${formattedDateTime}` : null,
+      "",
+      "Please complete your waiver before arrival:",
+      params.waiverUrl,
+      "",
+      "If this waiver is being completed for a minor participant, a parent or legal guardian must complete it.",
+      "",
+      "Thank you,",
+      "Tex Axes",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const html = `
+      <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#111827;">
+        <p>Hi ${params.firstName || "there"},</p>
+        <p>Your Tex Axes booking is in our system.</p>
+        ${
+          formattedDateTime
+            ? `<p><strong>Booking time:</strong> ${formattedDateTime}</p>`
+            : ""
+        }
+        <p>Please complete your waiver before arrival:</p>
+        <p>
+          <a href="${params.waiverUrl}" style="display:inline-block;padding:12px 18px;background:#f97316;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;">
+            Complete Waiver
+          </a>
+        </p>
+        <p style="word-break:break-all;color:#4b5563;">${params.waiverUrl}</p>
+        <p>If this waiver is being completed for a minor participant, a parent or legal guardian must complete it.</p>
+        <p>Thank you,<br />Tex Axes</p>
+      </div>
+    `;
+
+    const { error } = await resend.emails.send({
+      from: WAIVER_FROM_EMAIL,
+      to: params.to.trim(),
+      subject,
+      text,
+      html,
+    });
+
+    if (error) {
+      return { sent: false, error: error.message || "resend_send_failed" };
+    }
+
+    return { sent: true, error: null };
+  } catch (error: any) {
+    return {
+      sent: false,
+      error: error?.message || "waiver_email_failed",
+    };
+  }
 }
 
 async function writeAuditLog(
@@ -1003,6 +1097,15 @@ app.post("/api/admin/create-booking", async (req, res) => {
       return res.status(500).json({ error: "Payment record insert failed" });
     }
 
+    const waiverUrl = buildWaiverUrl(booking.id, customer.id);
+    const waiverEmailResult = await sendWaiverEmail({
+      to: customer.email,
+      firstName: customer.first_name,
+      waiverUrl,
+      bookingDate: date,
+      bookingTime: time,
+    });
+
     await writeAuditLog(
       "booking_admin_created",
       "booking",
@@ -1020,6 +1123,8 @@ app.post("/api/admin/create-booking", async (req, res) => {
         booking_status: bookingStatus,
         payment_status: paymentStatus,
         total_amount: pricing.total_amount,
+        waiver_email_sent: waiverEmailResult.sent,
+        waiver_email_error: waiverEmailResult.error,
       },
       "admin"
     );
@@ -1030,7 +1135,9 @@ app.post("/api/admin/create-booking", async (req, res) => {
       customer_id: customer.id,
       booking_status: bookingStatus,
       payment_status: paymentStatus,
-      waiver_url: buildWaiverUrl(booking.id, customer.id),
+      waiver_url: waiverUrl,
+      waiver_email_sent: waiverEmailResult.sent,
+      waiver_email_error: waiverEmailResult.error,
       totals: {
         base_price: pricing.base_price,
         addons_subtotal: pricing.addons_subtotal,
@@ -1359,6 +1466,15 @@ app.post("/book", async (req, res) => {
       return res.status(500).json({ error: "Payment session update failed" });
     }
 
+    const waiverUrl = buildWaiverUrl(booking.id, customer.id);
+    const waiverEmailResult = await sendWaiverEmail({
+      to: customer.email,
+      firstName: customer.first_name,
+      waiverUrl,
+      bookingDate: date,
+      bookingTime: time,
+    });
+
     await writeAuditLog("booking_created", "booking", booking.id, {
       booking_id: booking.id,
       customer_id: customer.id,
@@ -1368,13 +1484,17 @@ app.post("/book", async (req, res) => {
       allocation_mode: allocationMode,
       total_amount: pricing.total_amount,
       booking_source: bookingSource,
+      waiver_email_sent: waiverEmailResult.sent,
+      waiver_email_error: waiverEmailResult.error,
     });
 
     return res.json({
       booking_id: booking.id,
       customer_id: customer.id,
       checkout_url: session.url,
-      waiver_url: buildWaiverUrl(booking.id, customer.id),
+      waiver_url: waiverUrl,
+      waiver_email_sent: waiverEmailResult.sent,
+      waiver_email_error: waiverEmailResult.error,
       totals: {
         base_price: pricing.base_price,
         addons_subtotal: pricing.addons_subtotal,
