@@ -778,19 +778,19 @@ async function getWaiverSummaryForBooking(
       .select("id, expires_at, is_minor, parent_customer_id, booking_id")
       .eq("booking_id", bookingId);
 
-if (!error && data && Array.isArray(data)) {
-  const validForBookingDate = data.filter((row) => {
+if (!error && data && Array.isArray(data) && data.length > 0) {
+  const validForBookingDate = data.filter((row: any) => {
     const expiresAt = new Date(row.expires_at);
     const booking = new Date(`${bookingDate}T00:00:00`);
     return expiresAt >= booking;
   });
 
   const guardianRequired = validForBookingDate.some(
-    (row) => row.is_minor && !row.parent_customer_id
+    (row: any) => row.is_minor && !row.parent_customer_id
   );
 
   const signed = validForBookingDate.filter(
-    (row) => !(row.is_minor && !row.parent_customer_id)
+    (row: any) => !(row.is_minor && !row.parent_customer_id)
   ).length;
 
   if (guardianRequired) {
