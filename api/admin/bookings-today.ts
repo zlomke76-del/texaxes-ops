@@ -341,11 +341,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       bookings,
     });
   } catch (err: any) {
-    console.error(
-      "bookings-today failed",
-      err instanceof Error ? err.message : err,
-      err
-    );
-    return res.status(500).json({ error: err?.message || "Server error" });
-  }
+  console.error(
+    "bookings-today failed FULL",
+    JSON.stringify(
+      {
+        message: err?.message,
+        details: err?.details,
+        hint: err?.hint,
+        code: err?.code,
+        stack: err?.stack,
+        err,
+      },
+      null,
+      2
+    )
+  );
+
+  return res.status(500).json({
+    error: "Failed to load today bookings",
+    debug: {
+      message: err?.message || null,
+      details: err?.details || null,
+      hint: err?.hint || null,
+      code: err?.code || null,
+    },
+  });
 }
