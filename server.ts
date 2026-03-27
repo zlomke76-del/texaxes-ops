@@ -912,18 +912,15 @@ async function loadTabById(tabId: string) {
         phone
       ),
         bookings (
-        id,
-        booking_type,
-        booking_source,
-        status,
-        party_size,
-        total_amount,
-        tax_exempt,
-        tax_exempt_reason,
-        tax_exempt_status,
-        customer_notes,
-        internal_notes
-      )
+          id,
+          booking_type,
+          booking_source,
+          status,
+          party_size,
+          total_amount,
+          customer_notes,
+          internal_notes
+        )
     `)
     .eq("id", tabId)
     .single();
