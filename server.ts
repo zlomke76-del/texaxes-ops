@@ -775,61 +775,62 @@ async function getWaiverSummaryForBooking(
     const { data, error } = await supabase
       .schema("texaxes")
       .from("waivers")
-      .select("id, expires_at, is_minor, guardian_customer_id, booking_id")
+      .select("id, expires_at, is_minor, parent_customer_id, booking_id")
       .eq("booking_id", bookingId);
 
-    if (!error && data) {
-      const validForBookingDate = (data || []).filter((row) => {
-        const expiresAt = new Date(row.expires_at);
-        const booking = new Date(`${bookingDate}T00:00:00`);
-        return expiresAt >= booking;
-      });
+if (!error && data && Array.isArray(data)) {
+  const validForBookingDate = data.filter((row) => {
+    const expiresAt = new Date(row.expires_at);
+    const booking = new Date(`${bookingDate}T00:00:00`);
+    return expiresAt >= booking;
+  });
 
-      const guardianRequired = validForBookingDate.some(
-        (row) => row.is_minor && !row.guardian_customer_id
-      );
-      const signed = validForBookingDate.filter(
-        (row) => !(row.is_minor && !row.guardian_customer_id)
-      ).length;
+  const guardianRequired = validForBookingDate.some(
+    (row) => row.is_minor && !row.parent_customer_id
+  );
 
-      if (guardianRequired) {
-        return {
-          waiver_status: "guardian_required",
-          waiver_required: required,
-          waiver_signed: signed,
-        };
-      }
+  const signed = validForBookingDate.filter(
+    (row) => !(row.is_minor && !row.parent_customer_id)
+  ).length;
 
-      if (signed >= required) {
-        return {
-          waiver_status: "complete",
-          waiver_required: required,
-          waiver_signed: signed,
-        };
-      }
-
-      if (signed > 0) {
-        return {
-          waiver_status: "partial",
-          waiver_required: required,
-          waiver_signed: signed,
-        };
-      }
-
-      return {
-        waiver_status: "missing",
-        waiver_required: required,
-        waiver_signed: 0,
-      };
-    }
-  } catch {
-    // fall through to legacy fallback
+  if (guardianRequired) {
+    return {
+      waiver_status: "guardian_required",
+      waiver_required: required,
+      waiver_signed: signed,
+    };
   }
+
+  if (signed >= required) {
+    return {
+      waiver_status: "complete",
+      waiver_required: required,
+      waiver_signed: signed,
+    };
+  }
+
+  if (signed > 0) {
+    return {
+      waiver_status: "partial",
+      waiver_required: required,
+      waiver_signed: signed,
+    };
+  }
+
+  return {
+    waiver_status: "missing",
+    waiver_required: required,
+    waiver_signed: 0,
+  };
+}
+} catch {
+  // fall through to legacy fallback
+}
 
   const { data, error } = await supabase
     .schema("texaxes")
     .from("waivers")
-    .select("expires_at, is_minor, guardian_customer_id")
+    .select("expires_at, is_minor, parent_customer_id")
     .eq("customer_id", customerId)
     .order("signed_at", { ascending: false })
     .limit(1)
@@ -854,7 +855,7 @@ async function getWaiverSummaryForBooking(
     };
   }
 
-  if (data.is_minor && !data.guardian_customer_id) {
+  if (data.is_minor && !data.parent_customer_id) {
     return {
       waiver_status: "guardian_required",
       waiver_required: required,
@@ -1166,7 +1167,7 @@ app.post("/api/waivers/sign", async (req, res) => {
       ip_address: req.ip || null,
       user_agent: req.headers["user-agent"] || null,
       is_minor: Boolean(is_minor),
-      guardian_customer_id: guardianCustomerId,
+      parent_customer_id: guardianCustomerId,
     };
 
     if (booking_id) {
@@ -1190,7 +1191,7 @@ app.post("/api/waivers/sign", async (req, res) => {
       waiver.id,
       {
         customer_id: customerRow.id,
-        guardian_customer_id: guardianCustomerId,
+        parent_customer_id: guardianCustomerId,
         booking_id: booking_id || null,
         is_minor: Boolean(is_minor),
       },
