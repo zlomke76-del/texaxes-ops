@@ -327,6 +327,34 @@ function deriveWaiverStatus(payload: BookingPayload): "missing" | "guardian_requ
   }
   return "missing";
 }
+async function getWaiverStatusForCustomer(
+  customerId: string,
+  bookingDate: string
+): Promise<"signed" | "expired" | "missing" | "guardian_required"> {
+  const { data, error } = await supabase
+    .schema("texaxes")
+    .from("waivers")
+    .select("expires_at, is_minor, guardian_customer_id")
+    .eq("customer_id", customerId)
+    .order("signed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  if (!data) return "missing";
+
+  const booking = new Date(`${bookingDate}T00:00:00`);
+  const expiry = new Date(data.expires_at);
+
+  if (expiry < booking) return "expired";
+
+  if (data.is_minor && !data.guardian_customer_id) {
+    return "guardian_required";
+  }
+
+  return "signed";
+}
 
 async function writeAuditLog(
   action: string,
@@ -1287,6 +1315,115 @@ app.post("/book", async (req, res) => {
   } catch (error) {
     console.error("POST /book failed", error);
     return res.status(500).json({ error: "Booking failed" });
+  }
+});
+
+// ======================================================
+// WAIVER SIGN
+// POST /api/waivers/sign
+// ======================================================
+app.post("/api/waivers/sign", async (req, res) => {
+  try {
+    const {
+      customer,
+      is_minor,
+      guardian,
+      signature_data_url,
+      signature_method = "electronic",
+      booking_id,
+    } = req.body;
+
+    if (!customer?.first_name || !customer?.last_name) {
+      return res.status(400).json({ error: "Customer name required" });
+    }
+
+    if (!signature_data_url) {
+      return res.status(400).json({ error: "Signature required" });
+    }
+
+    // 1. create/find customer
+    const customerRow = await findOrCreateCustomer({
+      ...customer,
+      is_minor: Boolean(is_minor),
+    });
+
+    let guardianCustomerId: string | null = null;
+
+    // 2. handle guardian if minor
+    if (is_minor) {
+      if (!guardian?.first_name || !guardian?.last_name) {
+        return res.status(400).json({ error: "Guardian required for minor" });
+      }
+
+      const guardianRow = await findOrCreateCustomer({
+        ...guardian,
+        is_minor: false,
+      });
+
+      guardianCustomerId = guardianRow.id;
+    }
+
+    // 3. compute dates
+    const signedAt = new Date();
+    const expiresAt = new Date(signedAt);
+    expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+
+    // 4. simple version hash (upgrade later if needed)
+    const waiverVersionHash = "v1";
+
+    // 5. insert waiver
+    const { data: waiver, error } = await supabase
+      .schema("texaxes")
+      .from("waivers")
+      .insert({
+        customer_id: customerRow.id,
+        waiver_version_hash: waiverVersionHash,
+        signed_at: signedAt.toISOString(),
+        expires_at: expiresAt.toISOString(),
+        signature_method,
+        ip_address: req.ip || null,
+        user_agent: req.headers["user-agent"] || null,
+        is_minor: Boolean(is_minor),
+        guardian_customer_id: guardianCustomerId,
+      })
+      .select()
+      .single();
+
+    if (error || !waiver) {
+      throw error || new Error("Waiver insert failed");
+    }
+
+    // 6. update booking waiver status (if provided)
+    if (booking_id) {
+      await supabase
+        .schema("texaxes")
+        .from("bookings")
+        .update({
+          waiver_status: "signed",
+        })
+        .eq("id", booking_id);
+    }
+
+    await writeAuditLog(
+      "waiver_signed",
+      "waiver",
+      waiver.id,
+      {
+        customer_id: customerRow.id,
+        booking_id,
+        is_minor,
+      },
+      "customer"
+    );
+
+    return res.json({
+      success: true,
+      waiver_id: waiver.id,
+      expires_at: expiresAt.toISOString(),
+    });
+  } catch (error) {
+    console.error("POST /api/waivers/sign failed", error);
+    return res.status(500).json({ error: "Waiver signing failed" });
   }
 });
 
