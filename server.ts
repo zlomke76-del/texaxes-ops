@@ -771,43 +771,48 @@ async function getWaiverSummaryForBooking(
 }> {
   const required = Math.max(1, Number(partySize || 1));
 
-  try {
-    const { data, error } = await supabase
-      .schema("texaxes")
-      .from("waivers")
-      .select("id, expires_at, is_minor, parent_customer_id, booking_id")
-      .eq("booking_id", bookingId);
+  const { data, error } = await supabase
+    .schema("texaxes")
+    .from("waivers")
+    .select("expires_at, is_minor, parent_customer_id")
+    .eq("customer_id", customerId)
+    .order("signed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-if (!error && data && Array.isArray(data) && data.length > 0) {
-  const validForBookingDate = data.filter((row: any) => {
-    const expiresAt = new Date(row.expires_at);
-    const booking = new Date(`${bookingDate}T00:00:00`);
-    return expiresAt >= booking;
-  });
+  if (error || !data) {
+    return {
+      waiver_status: "missing",
+      waiver_required: required,
+      waiver_signed: 0,
+    };
+  }
 
-  const guardianRequired = validForBookingDate.some(
-    (row: any) => row.is_minor && !row.parent_customer_id
-  );
+  const booking = new Date(`${bookingDate}T00:00:00`);
+  const expiry = new Date(data.expires_at);
 
-  const signed = validForBookingDate.filter(
-    (row: any) => !(row.is_minor && !row.parent_customer_id)
-  ).length;
+  if (expiry < booking) {
+    return {
+      waiver_status: "expired",
+      waiver_required: required,
+      waiver_signed: 0,
+    };
+  }
 
-  if (guardianRequired) {
+  if (data.is_minor && !data.parent_customer_id) {
     return {
       waiver_status: "guardian_required",
       waiver_required: required,
-      waiver_signed: signed,
+      waiver_signed: 0,
     };
   }
 
-  if (signed >= required) {
-    return {
-      waiver_status: "complete",
-      waiver_required: required,
-      waiver_signed: signed,
-    };
-  }
+  return {
+    waiver_status: required > 1 ? "partial" : "complete",
+    waiver_required: required,
+    waiver_signed: 1,
+  };
+}
 
   if (signed > 0) {
     return {
