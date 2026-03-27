@@ -24,6 +24,8 @@ const ADDON_PRICES = {
   shovel: 20,
 } as const;
 
+type TaxExemptStatus = "pending_form" | "verified";
+
 type BookingPayload = {
   date: string;
   time: string;
@@ -49,6 +51,10 @@ type BookingPayload = {
   booking_type?: "open" | "league" | "corporate";
   customer_notes?: string | null;
   internal_notes?: string | null;
+  tax_exempt?: boolean;
+  tax_exempt_reason?: string | null;
+  tax_exempt_status?: TaxExemptStatus | null;
+  tax_exempt_note?: string | null;
 };
 
 type CustomerRow = {
@@ -86,6 +92,7 @@ type PricingResult = {
   subtotal: number;
   tax_amount: number;
   total_amount: number;
+  tax_exempt: boolean;
   addon_lines: Array<{
     addon_code: string;
     quantity: number;
@@ -97,7 +104,6 @@ type PricingResult = {
 function setCors(req: any, res: any) {
   const origin = req.headers.origin || "";
 
-  // Allow all Vercel deployments + local dev
   if (
     origin.includes("vercel.app") ||
     origin.includes("localhost") ||
@@ -168,6 +174,21 @@ function normalizePhone(phone?: string | null): string | null {
   return trimmed.length ? trimmed : null;
 }
 
+function normalizeOptionalText(value?: string | null): string | null {
+  if (value == null) return null;
+  const trimmed = String(value).trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function normalizeTaxExemptStatus(
+  value?: string | null
+): TaxExemptStatus | null {
+  if (value === "pending_form" || value === "verified") {
+    return value;
+  }
+  return null;
+}
+
 function computeBayRequirements(throwers: number) {
   return {
     preferred: Math.ceil(throwers / PREFERRED_THROWERS_PER_BAY),
@@ -224,7 +245,7 @@ async function getWaiverStatusForCustomer(
   return "signed";
 }
 
-function computePricing(payload: BookingPayload): PricingResult {
+function computePricing(payload: BookingPayload, taxExempt: boolean): PricingResult {
   const throwers = Number(payload.throwers || 0);
   const addons = payload.addons || {};
 
@@ -268,7 +289,7 @@ function computePricing(payload: BookingPayload): PricingResult {
   );
 
   const subtotal = roundMoney(base_price + addons_subtotal);
-  const tax_amount = roundMoney(subtotal * TAX_RATE);
+  const tax_amount = taxExempt ? 0 : roundMoney(subtotal * TAX_RATE);
   const total_amount = roundMoney(subtotal + tax_amount);
 
   return {
@@ -277,8 +298,36 @@ function computePricing(payload: BookingPayload): PricingResult {
     subtotal,
     tax_amount,
     total_amount,
+    tax_exempt: taxExempt,
     addon_lines,
   };
+}
+
+function buildInternalNotes(payload: BookingPayload, taxExempt: boolean): string | null {
+  const notes: string[] = [];
+
+  if (taxExempt) {
+    notes.push("[TAX EXEMPT]");
+    notes.push(
+      `Reason: ${normalizeOptionalText(payload.tax_exempt_reason) || "not specified"}`
+    );
+
+    if (payload.tax_exempt_status === "verified") {
+      notes.push("Tax exempt form collected.");
+    } else {
+      notes.push("Collect tax exempt form.");
+    }
+
+    if (normalizeOptionalText(payload.tax_exempt_note)) {
+      notes.push(`Tax note: ${normalizeOptionalText(payload.tax_exempt_note)}`);
+    }
+  }
+
+  if (normalizeOptionalText(payload.internal_notes)) {
+    notes.push(normalizeOptionalText(payload.internal_notes)!);
+  }
+
+  return notes.length ? notes.join("\n") : null;
 }
 
 async function writeAuditLog(
@@ -434,6 +483,8 @@ export default async function handler(req: any, res: any) {
     const date = normalizeDate(payload.date);
     const time = normalizeTime(payload.time);
     const throwers = Number(payload.throwers);
+    const bookingSource = payload.booking_source || "public";
+    const bookingType = payload.booking_type || "open";
 
     if (!Number.isInteger(throwers) || throwers <= 0) {
       return badRequest(res, "Invalid thrower count");
@@ -444,6 +495,23 @@ export default async function handler(req: any, res: any) {
         error: "Group too large for public booking. Contact Tex Axes for a full venue booking.",
       });
     }
+
+    const requestedTaxExempt = Boolean(payload.tax_exempt);
+    const normalizedTaxExemptStatus = normalizeTaxExemptStatus(payload.tax_exempt_status);
+    const isStaffManagedBooking = bookingSource !== "public";
+
+    if (requestedTaxExempt && !isStaffManagedBooking) {
+      return badRequest(res, "Tax exemption can only be applied to staff-managed bookings");
+    }
+
+    if (requestedTaxExempt && !normalizeOptionalText(payload.tax_exempt_reason)) {
+      return badRequest(res, "Tax exempt reason is required");
+    }
+
+    const taxExempt = requestedTaxExempt && isStaffManagedBooking;
+    const taxExemptStatus = taxExempt
+      ? normalizedTaxExemptStatus || "pending_form"
+      : null;
 
     if (payload.customer.birth_date) {
       const age = calculateAgeOnDate(payload.customer.birth_date, date);
@@ -483,10 +551,9 @@ export default async function handler(req: any, res: any) {
     const baysAllocated = allocationMode === "preferred" ? preferred : minimum;
 
     const customer = await findOrCreateCustomer(payload.customer);
-    const pricing = computePricing(payload);
+    const pricing = computePricing(payload, taxExempt);
     const waiverStatus = deriveWaiverStatus(payload.customer);
-    const bookingSource = payload.booking_source || "public";
-    const bookingType = payload.booking_type || "open";
+    const internalNotes = buildInternalNotes(payload, taxExempt);
 
     const { data: booking, error: bookingError } = await supabase
       .schema("texaxes")
@@ -507,9 +574,14 @@ export default async function handler(req: any, res: any) {
         tax_amount: pricing.tax_amount,
         total_amount: pricing.total_amount,
         waiver_status: waiverStatus,
-        internal_notes: payload.internal_notes || null,
+        internal_notes: internalNotes,
         customer_notes: payload.customer_notes || null,
         created_by: bookingSource,
+        tax_exempt: taxExempt,
+        tax_exempt_reason: taxExempt
+          ? normalizeOptionalText(payload.tax_exempt_reason)
+          : null,
+        tax_exempt_status: taxExempt ? taxExemptStatus : null,
       })
       .select()
       .single();
@@ -590,6 +662,8 @@ export default async function handler(req: any, res: any) {
         payment_id: paymentRow.id,
         customer_id: customer.id,
         booking_source: bookingSource,
+        tax_exempt: String(taxExempt),
+        tax_exempt_status: taxExemptStatus || "",
       },
       payment_intent_data: {
         metadata: {
@@ -597,6 +671,8 @@ export default async function handler(req: any, res: any) {
           payment_id: paymentRow.id,
           customer_id: customer.id,
           booking_source: bookingSource,
+          tax_exempt: String(taxExempt),
+          tax_exempt_status: taxExemptStatus || "",
         },
       },
       line_items: [
@@ -604,7 +680,7 @@ export default async function handler(req: any, res: any) {
           price_data: {
             currency: "usd",
             product_data: {
-              name: "Tex Axes Booking",
+              name: taxExempt ? "Tex Axes Booking (Tax Exempt)" : "Tex Axes Booking",
               description: `${date} ${time.slice(0, 5)} · ${throwers} thrower(s)`,
             },
             unit_amount: Math.round(pricing.total_amount * 100),
@@ -651,6 +727,11 @@ export default async function handler(req: any, res: any) {
       allocation_mode: allocationMode,
       total_amount: pricing.total_amount,
       booking_source: bookingSource,
+      tax_exempt: taxExempt,
+      tax_exempt_reason: taxExempt
+        ? normalizeOptionalText(payload.tax_exempt_reason)
+        : null,
+      tax_exempt_status: taxExemptStatus,
     });
 
     return res.status(200).json({
@@ -669,6 +750,11 @@ export default async function handler(req: any, res: any) {
         preferred_bays_required: preferred,
         minimum_bays_required: minimum,
       },
+      tax_exempt: taxExempt,
+      tax_exempt_reason: taxExempt
+        ? normalizeOptionalText(payload.tax_exempt_reason)
+        : null,
+      tax_exempt_status: taxExemptStatus,
     });
   } catch (error) {
     console.error("POST /api/book failed", error);
