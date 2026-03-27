@@ -36,23 +36,29 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 
-const PORT = Number(process.env.PORT || 3001);
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const WAIVER_FROM_EMAIL =
   process.env.WAIVER_FROM_EMAIL || "Tex Axes <onboarding@resend.dev>";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
-  apiVersion: "2024-06-20",
-});
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY || "";
+const stripe = stripeSecretKey
+  ? new Stripe(stripeSecretKey, {
+      apiVersion: "2024-06-20",
+    })
+  : null;
 
 const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
   : null;
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!supabaseUrl || !supabaseServiceRoleKey) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+}
+
+const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 
 // ======================================================
 // CONFIG
@@ -760,7 +766,7 @@ async function getLatestPaymentByBookingId(
 }
 
 async function getWaiverSummaryForBooking(
-  bookingId: string,
+  _bookingId: string,
   customerId: string,
   bookingDate: string,
   partySize: number
@@ -770,67 +776,6 @@ async function getWaiverSummaryForBooking(
   waiver_signed: number;
 }> {
   const required = Math.max(1, Number(partySize || 1));
-
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("waivers")
-    .select("expires_at, is_minor, parent_customer_id")
-    .eq("customer_id", customerId)
-    .order("signed_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error || !data) {
-    return {
-      waiver_status: "missing",
-      waiver_required: required,
-      waiver_signed: 0,
-    };
-  }
-
-  const booking = new Date(`${bookingDate}T00:00:00`);
-  const expiry = new Date(data.expires_at);
-
-  if (expiry < booking) {
-    return {
-      waiver_status: "expired",
-      waiver_required: required,
-      waiver_signed: 0,
-    };
-  }
-
-  if (data.is_minor && !data.parent_customer_id) {
-    return {
-      waiver_status: "guardian_required",
-      waiver_required: required,
-      waiver_signed: 0,
-    };
-  }
-
-  return {
-    waiver_status: required > 1 ? "partial" : "complete",
-    waiver_required: required,
-    waiver_signed: 1,
-  };
-}
-
-  if (signed > 0) {
-    return {
-      waiver_status: "partial",
-      waiver_required: required,
-      waiver_signed: signed,
-    };
-  }
-
-  return {
-    waiver_status: "missing",
-    waiver_required: required,
-    waiver_signed: 0,
-  };
-}
-} catch {
-  // fall through to legacy fallback
-}
 
   const { data, error } = await supabase
     .schema("texaxes")
@@ -1272,6 +1217,26 @@ app.get("/api/admin/bookings-today", async (req, res) => {
     if (bookingError) throw bookingError;
 
     const bookings = bookingRows || [];
+
+    if (!bookings.length) {
+      return res.json({
+        date,
+        summary: {
+          booking_count: 0,
+          paid_count: 0,
+          unpaid_count: 0,
+          checked_in_count: 0,
+          completed_count: 0,
+          expected_revenue: 0,
+          collected_revenue: 0,
+          waiver_complete_count: 0,
+          waiver_partial_count: 0,
+          waiver_missing_count: 0,
+        },
+        bookings: [],
+      });
+    }
+
     const bookingIds = bookings.map((row) => row.id);
     const customerIds = [...new Set(bookings.map((row) => row.customer_id).filter(Boolean))];
 
@@ -1279,17 +1244,21 @@ app.get("/api/admin/bookings-today", async (req, res) => {
       { data: customerRows, error: customerError },
       { data: paymentRows, error: paymentError },
     ] = await Promise.all([
-      supabase
-        .schema("texaxes")
-        .from("customers")
-        .select("id, first_name, last_name, email, phone")
-        .in("id", customerIds),
-      supabase
-        .schema("texaxes")
-        .from("payments")
-        .select("id, booking_id, status, amount, created_at")
-        .in("booking_id", bookingIds)
-        .order("created_at", { ascending: false }),
+      customerIds.length
+        ? supabase
+            .schema("texaxes")
+            .from("customers")
+            .select("id, first_name, last_name, email, phone")
+            .in("id", customerIds)
+        : Promise.resolve({ data: [], error: null }),
+      bookingIds.length
+        ? supabase
+            .schema("texaxes")
+            .from("payments")
+            .select("id, booking_id, status, amount, created_at")
+            .in("booking_id", bookingIds)
+            .order("created_at", { ascending: false })
+        : Promise.resolve({ data: [], error: null }),
     ]);
 
     if (customerError) throw customerError;
@@ -2353,6 +2322,10 @@ app.post("/api/admin/void-payment", async (req, res) => {
 // ======================================================
 app.post("/book", async (req, res) => {
   try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe is not configured" });
+    }
+
     const payload = req.body as BookingPayload;
 
     if (!payload?.date || !payload?.time || !payload?.throwers || !payload?.customer) {
@@ -2614,6 +2587,4 @@ app.post("/book", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Tex Axes Ops running on ${PORT}`);
-});
+export default app;
