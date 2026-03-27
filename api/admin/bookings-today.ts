@@ -94,24 +94,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           email,
           phone
         ),
-        time_blocks (
+        time_blocks!inner (
           block_date,
           start_time,
           end_time
         )
       `)
       .eq("time_blocks.block_date", date)
-      .order("time_blocks.start_time", { ascending: true });
+      .order("start_time", {
+        referencedTable: "time_blocks",
+        ascending: true,
+      });
 
     if (error) {
-      console.error("bookings-today query error", error);
+      console.error("bookings-today query error", JSON.stringify(error, null, 2));
       return res.status(500).json({ error: "Failed to fetch bookings" });
     }
 
     const rows = data || [];
     const bookingIds = rows.map((row: any) => row.id);
 
-    let waiverCounts = new Map<
+    const waiverCounts = new Map<
       string,
       {
         signed: number;
@@ -124,11 +127,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const { data: waiverRows, error: waiverError } = await supabase
         .schema("texaxes")
         .from("waivers")
-        .select("booking_id, expires_at, is_minor, guardian_customer_id")
+        .select("booking_id, expires_at, is_minor, parent_customer_id")
         .in("booking_id", bookingIds);
 
       if (waiverError) {
-        console.error("bookings-today waiver query error", waiverError);
+        console.error("bookings-today waiver query error", JSON.stringify(waiverError, null, 2));
         return res.status(500).json({ error: "Failed to fetch waiver data" });
       }
 
@@ -146,7 +149,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         const expiresAt = waiver.expires_at ? new Date(waiver.expires_at) : null;
         const isExpired = !expiresAt || expiresAt < validOnOrAfter;
-        const needsGuardian = Boolean(waiver.is_minor) && !waiver.guardian_customer_id;
+        const needsGuardian = Boolean(waiver.is_minor) && !waiver.parent_customer_id;
 
         if (needsGuardian) {
           current.guardianRequired += 1;
@@ -161,8 +164,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const bookings = rows.map((row: any) => {
-      const customer = row.customers || {};
-      const block = row.time_blocks || {};
+      const customer = Array.isArray(row.customers) ? row.customers[0] || {} : row.customers || {};
+      const block = Array.isArray(row.time_blocks) ? row.time_blocks[0] || {} : row.time_blocks || {};
       const requiredWaivers = Number(row.party_size || 0);
 
       const waiverCount = waiverCounts.get(row.id) || {
@@ -202,7 +205,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         waiver_required: requiredWaivers,
         waiver_signed: waiverCount.signed,
         waiver_status: waiverStatus,
-        waiver_url: `${process.env.FRONTEND_URL}/waiver?booking=${row.id}`,
+        waiver_url: `${process.env.FRONTEND_URL}/waiver?booking_id=${row.id}&customer_id=${row.customer_id}`,
 
         total_amount: Number(row.total_amount || 0),
         tax_amount: Number(row.tax_amount || 0),
@@ -244,7 +247,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       bookings,
     });
   } catch (err: any) {
-    console.error("bookings-today failed", err);
+    console.error("bookings-today failed", err?.message || err, err);
     return res.status(500).json({ error: err.message || "Server error" });
   }
 }
