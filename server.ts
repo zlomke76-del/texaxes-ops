@@ -181,6 +181,7 @@ type AdminPaymentStatus = "pending" | "paid" | "failed" | "void";
 
 type TodayBookingRow = {
   booking_id: string;
+  customer_id: string;
   start_time: string;
   end_time: string;
   customer_name: string;
@@ -192,6 +193,7 @@ type TodayBookingRow = {
   booking_status: string;
   payment_status: string;
   waiver_status: "signed" | "expired" | "missing" | "guardian_required";
+  waiver_url: string;
   total_amount: number;
   amount_paid: number;
   customer_notes: string | null;
@@ -319,6 +321,13 @@ function deriveInitialWaiverStatus(payload: BookingPayload): "missing" | "guardi
     return "guardian_required";
   }
   return "missing";
+}
+
+function buildWaiverUrl(bookingId: string, customerId: string): string {
+  const base = FRONTEND_URL.replace(/\/+$/, "");
+  return `${base}/waiver?booking_id=${encodeURIComponent(
+    bookingId
+  )}&customer_id=${encodeURIComponent(customerId)}`;
 }
 
 async function writeAuditLog(
@@ -807,6 +816,7 @@ app.get("/api/admin/bookings-today", async (req, res) => {
 
         return {
           booking_id: booking.id,
+          customer_id: booking.customer_id,
           start_time: block?.start_time || "00:00:00",
           end_time: block?.end_time || "00:00:00",
           customer_name: customer
@@ -821,6 +831,7 @@ app.get("/api/admin/bookings-today", async (req, res) => {
           booking_status: booking.status || "unknown",
           payment_status: payment?.status || "unknown",
           waiver_status: waiverStatus,
+          waiver_url: buildWaiverUrl(booking.id, booking.customer_id),
           total_amount: Number(booking.total_amount || 0),
           amount_paid: payment?.status === "paid" ? Number(payment.amount || 0) : 0,
           customer_notes: booking.customer_notes || null,
@@ -1016,8 +1027,10 @@ app.post("/api/admin/create-booking", async (req, res) => {
     return res.json({
       success: true,
       booking_id: booking.id,
+      customer_id: customer.id,
       booking_status: bookingStatus,
       payment_status: paymentStatus,
+      waiver_url: buildWaiverUrl(booking.id, customer.id),
       totals: {
         base_price: pricing.base_price,
         addons_subtotal: pricing.addons_subtotal,
@@ -1359,7 +1372,9 @@ app.post("/book", async (req, res) => {
 
     return res.json({
       booking_id: booking.id,
+      customer_id: customer.id,
       checkout_url: session.url,
+      waiver_url: buildWaiverUrl(booking.id, customer.id),
       totals: {
         base_price: pricing.base_price,
         addons_subtotal: pricing.addons_subtotal,
