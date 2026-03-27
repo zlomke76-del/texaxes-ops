@@ -195,6 +195,35 @@ function deriveWaiverStatus(
   return customer.is_minor ? "guardian_required" : "missing";
 }
 
+async function getWaiverStatusForCustomer(
+  customerId: string,
+  bookingDate: string
+): Promise<"signed" | "expired" | "missing" | "guardian_required"> {
+  const { data, error } = await supabase
+    .schema("texaxes")
+    .from("waivers")
+    .select("expires_at, is_minor, guardian_customer_id")
+    .eq("customer_id", customerId)
+    .order("signed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  if (!data) return "missing";
+
+  const booking = new Date(`${bookingDate}T00:00:00`);
+  const expiry = new Date(data.expires_at);
+
+  if (expiry < booking) return "expired";
+
+  if (data.is_minor && !data.guardian_customer_id) {
+    return "guardian_required";
+  }
+
+  return "signed";
+}
+
 function computePricing(payload: BookingPayload): PricingResult {
   const throwers = Number(payload.throwers || 0);
   const addons = payload.addons || {};
