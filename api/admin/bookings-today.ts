@@ -79,7 +79,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .order("start_time", { ascending: true });
 
     if (timeBlocksError) {
-      console.error("bookings-today time_blocks query error", JSON.stringify(timeBlocksError, null, 2));
+      console.error(
+        "bookings-today time_blocks query error",
+        JSON.stringify(timeBlocksError, null, 2)
+      );
       return res.status(500).json({ error: "Failed to fetch time blocks" });
     }
 
@@ -133,7 +136,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .order("created_at", { ascending: true });
 
     if (bookingsError) {
-      console.error("bookings-today bookings query error", JSON.stringify(bookingsError, null, 2));
+      console.error(
+        "bookings-today bookings query error",
+        JSON.stringify(bookingsError, null, 2)
+      );
       return res.status(500).json({ error: "Failed to fetch bookings" });
     }
 
@@ -170,7 +176,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         .in("id", customerIds);
 
       if (customersError) {
-        console.error("bookings-today customers query error", JSON.stringify(customersError, null, 2));
+        console.error(
+          "bookings-today customers query error",
+          JSON.stringify(customersError, null, 2)
+        );
         return res.status(500).json({ error: "Failed to fetch customers" });
       }
 
@@ -188,43 +197,50 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     >();
 
-    if (bookingIds.length > 0) {
+    if (customerIds.length > 0) {
       const { data: waiverRows, error: waiverError } = await supabase
         .schema("texaxes")
         .from("waivers")
-        .select("booking_id, expires_at, is_minor, parent_customer_id")
-        .in("booking_id", bookingIds);
+        .select("customer_id, expires_at, is_minor, parent_customer_id")
+        .in("customer_id", customerIds);
 
       if (waiverError) {
-        console.error("bookings-today waiver query error", JSON.stringify(waiverError, null, 2));
+        console.error(
+          "bookings-today waiver query error",
+          JSON.stringify(waiverError, null, 2)
+        );
         return res.status(500).json({ error: "Failed to fetch waiver data" });
       }
 
       const validOnOrAfter = new Date(toStartOfDayIso(date));
 
       for (const waiver of waiverRows || []) {
-        const bookingId = waiver.booking_id as string | null;
-        if (!bookingId) continue;
+        const customerId = waiver.customer_id as string | null;
+        if (!customerId) continue;
 
-        const current = waiverCounts.get(bookingId) || {
-          signed: 0,
-          expired: 0,
-          guardianRequired: 0,
-        };
+        for (const booking of rows) {
+          if (booking.customer_id !== customerId) continue;
 
-        const expiresAt = waiver.expires_at ? new Date(waiver.expires_at) : null;
-        const isExpired = !expiresAt || expiresAt < validOnOrAfter;
-        const needsGuardian = Boolean(waiver.is_minor) && !waiver.parent_customer_id;
+          const current = waiverCounts.get(booking.id) || {
+            signed: 0,
+            expired: 0,
+            guardianRequired: 0,
+          };
 
-        if (needsGuardian) {
-          current.guardianRequired += 1;
-        } else if (isExpired) {
-          current.expired += 1;
-        } else {
-          current.signed += 1;
+          const expiresAt = waiver.expires_at ? new Date(waiver.expires_at) : null;
+          const isExpired = !expiresAt || expiresAt < validOnOrAfter;
+          const needsGuardian = Boolean(waiver.is_minor) && !waiver.parent_customer_id;
+
+          if (needsGuardian) {
+            current.guardianRequired += 1;
+          } else if (isExpired) {
+            current.expired += 1;
+          } else {
+            current.signed += 1;
+          }
+
+          waiverCounts.set(booking.id, current);
         }
-
-        waiverCounts.set(bookingId, current);
       }
     }
 
@@ -256,7 +272,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           start_time: block.start_time || null,
           end_time: block.end_time || null,
 
-          customer_name: `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || "Unknown Customer",
+          customer_name:
+            `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
+            "Unknown Customer",
           email: customer.email || null,
           phone: customer.phone || null,
 
