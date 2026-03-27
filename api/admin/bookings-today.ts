@@ -127,9 +127,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         allocation_mode,
         internal_notes,
         customer_notes,
-        tax_exempt,
-        tax_exempt_reason,
-        tax_exempt_status,
         created_at
       `)
       .in("start_block_id", blockIds)
@@ -164,7 +161,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    const bookingIds = rows.map((row: any) => row.id);
     const customerIds = [...new Set(rows.map((row: any) => row.customer_id).filter(Boolean))];
 
     const customerMap = new Map<string, any>();
@@ -309,9 +305,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               ? null
               : Number(row.bays_allocated),
 
-          tax_exempt: row.tax_exempt ?? null,
-          tax_exempt_reason: row.tax_exempt_reason || null,
-          tax_exempt_status: row.tax_exempt_status || null,
+          tax_exempt: null,
+          tax_exempt_reason: null,
+          tax_exempt_status: null,
+          tax_exempt_form_collected_at: null,
 
           created_at: row.created_at || null,
         };
@@ -344,7 +341,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       bookings,
     });
   } catch (err: any) {
-    console.error("bookings-today failed", err?.message || err, err);
+    console.error(
+      "bookings-today failed",
+      err instanceof Error ? err.message : err,
+      err
+    );
     return res.status(500).json({ error: err?.message || "Server error" });
   }
 }
