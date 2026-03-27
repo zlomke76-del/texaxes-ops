@@ -34,7 +34,7 @@ app.use((req, res, next) => {
   return next();
 });
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 const PORT = Number(process.env.PORT || 3001);
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -51,7 +51,6 @@ const supabase = createClient(
 // ======================================================
 // CONFIG
 // ======================================================
-const TOTAL_BAYS = 4;
 const PREFERRED_THROWERS_PER_BAY = 4;
 const MAX_THROWERS_PER_BAY = 6;
 const PUBLIC_MAX_PARTY_SIZE = 24;
@@ -67,14 +66,6 @@ const ADDON_PRICES = {
   shovel: 20,
 } as const;
 
-const ACTIVE_CAPACITY_STATUSES = [
-  "pending",
-  "awaiting_payment",
-  "paid",
-  "confirmed",
-  "checked_in",
-] as const;
-
 // ======================================================
 // TYPES
 // ======================================================
@@ -83,20 +74,22 @@ type AvailabilityQuery = {
   throwers?: string;
 };
 
+type BaseCustomerPayload = {
+  first_name: string;
+  last_name: string;
+  email?: string | null;
+  phone?: string | null;
+  birth_date?: string | null;
+  is_minor?: boolean;
+  notes?: string | null;
+  marketing_opt_in?: boolean;
+};
+
 type BookingPayload = {
   date: string;
   time: string;
   throwers: number;
-  customer: {
-    first_name: string;
-    last_name: string;
-    email?: string | null;
-    phone?: string | null;
-    birth_date?: string | null;
-    is_minor?: boolean;
-    notes?: string | null;
-    marketing_opt_in?: boolean;
-  };
+  customer: BaseCustomerPayload;
   addons?: {
     byob_guests?: number;
     wktl_knife_rental_qty?: number;
@@ -114,21 +107,21 @@ type AdminCreateBookingPayload = {
   date: string;
   time: string;
   throwers: number;
-  customer: {
-    first_name: string;
-    last_name: string;
-    email?: string | null;
-    phone?: string | null;
-    birth_date?: string | null;
-    is_minor?: boolean;
-    notes?: string | null;
-    marketing_opt_in?: boolean;
-  };
+  customer: BaseCustomerPayload;
   booking_source?: "admin" | "phone" | "walk_in" | "corporate";
   booking_type?: "open" | "league" | "corporate";
   customer_notes?: string;
   internal_notes?: string;
   payment_status?: "pending" | "paid";
+};
+
+type WaiverSignPayload = {
+  booking_id?: string | null;
+  customer: BaseCustomerPayload;
+  is_minor?: boolean;
+  guardian?: BaseCustomerPayload | null;
+  signature_data_url: string;
+  signature_method?: string;
 };
 
 type CustomerRow = {
@@ -198,7 +191,7 @@ type TodayBookingRow = {
   booking_source: string | null;
   booking_status: string;
   payment_status: string;
-  waiver_status: string;
+  waiver_status: "signed" | "expired" | "missing" | "guardian_required";
   total_amount: number;
   amount_paid: number;
   customer_notes: string | null;
@@ -320,40 +313,12 @@ function computePricing(payload: BookingPayload): PricingResult {
   };
 }
 
-function deriveWaiverStatus(payload: BookingPayload): "missing" | "guardian_required" {
+function deriveInitialWaiverStatus(payload: BookingPayload): "missing" | "guardian_required" {
   const customer = payload.customer;
   if (customer?.is_minor) {
     return "guardian_required";
   }
   return "missing";
-}
-async function getWaiverStatusForCustomer(
-  customerId: string,
-  bookingDate: string
-): Promise<"signed" | "expired" | "missing" | "guardian_required"> {
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("waivers")
-    .select("expires_at, is_minor, guardian_customer_id")
-    .eq("customer_id", customerId)
-    .order("signed_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) throw error;
-
-  if (!data) return "missing";
-
-  const booking = new Date(`${bookingDate}T00:00:00`);
-  const expiry = new Date(data.expires_at);
-
-  if (expiry < booking) return "expired";
-
-  if (data.is_minor && !data.guardian_customer_id) {
-    return "guardian_required";
-  }
-
-  return "signed";
 }
 
 async function writeAuditLog(
@@ -392,12 +357,8 @@ async function findExistingCustomer(
       .limit(1)
       .maybeSingle<CustomerRow>();
 
-    if (error) {
-      throw error;
-    }
-    if (data) {
-      return data;
-    }
+    if (error) throw error;
+    if (data) return data;
   }
 
   if (phone && phone.trim()) {
@@ -411,18 +372,14 @@ async function findExistingCustomer(
       .limit(1)
       .maybeSingle<CustomerRow>();
 
-    if (error) {
-      throw error;
-    }
-    if (data) {
-      return data;
-    }
+    if (error) throw error;
+    if (data) return data;
   }
 
   return null;
 }
 
-async function findOrCreateCustomer(customer: BookingPayload["customer"]): Promise<CustomerRow> {
+async function findOrCreateCustomer(customer: BaseCustomerPayload): Promise<CustomerRow> {
   const existing = await findExistingCustomer(customer.email, customer.phone);
   if (existing) {
     return existing;
@@ -460,10 +417,7 @@ async function getTimeBlock(date: string, time: string): Promise<TimeBlockRow | 
     .eq("start_time", time)
     .maybeSingle<TimeBlockRow>();
 
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data ?? null;
 }
 
@@ -477,10 +431,7 @@ async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
     .eq("block_date", date)
     .order("start_time", { ascending: true });
 
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return (data || []) as CapacityRow[];
 }
 
@@ -494,10 +445,7 @@ async function getCapacityRowForBlock(timeBlockId: string): Promise<CapacityRow 
     .eq("time_block_id", timeBlockId)
     .maybeSingle<CapacityRow>();
 
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data ?? null;
 }
 
@@ -508,9 +456,7 @@ async function getAddonCatalogMap(): Promise<Map<string, string>> {
     .select("id, code")
     .eq("active", true);
 
-  if (error) {
-    throw error;
-  }
+  if (error) throw error;
 
   const map = new Map<string, string>();
   for (const row of data || []) {
@@ -531,11 +477,33 @@ async function getLatestPaymentByBookingId(
     .limit(1)
     .maybeSingle();
 
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data ?? null;
+}
+
+async function getWaiverStatusForCustomer(
+  customerId: string,
+  bookingDate: string
+): Promise<"signed" | "expired" | "missing" | "guardian_required"> {
+  const { data, error } = await supabase
+    .schema("texaxes")
+    .from("waivers")
+    .select("expires_at, is_minor, guardian_customer_id")
+    .eq("customer_id", customerId)
+    .order("signed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return "missing";
+
+  const booking = new Date(`${bookingDate}T00:00:00`);
+  const expiry = new Date(data.expires_at);
+
+  if (expiry < booking) return "expired";
+  if (data.is_minor && !data.guardian_customer_id) return "guardian_required";
+
+  return "signed";
 }
 
 // ======================================================
@@ -629,6 +597,110 @@ app.get("/availability", async (req, res) => {
 });
 
 // ======================================================
+// WAIVER SIGN
+// POST /api/waivers/sign
+// ======================================================
+app.post("/api/waivers/sign", async (req, res) => {
+  try {
+    const {
+      customer,
+      is_minor,
+      guardian,
+      signature_data_url,
+      signature_method = "electronic",
+      booking_id,
+    } = req.body as WaiverSignPayload;
+
+    if (!customer?.first_name || !customer?.last_name) {
+      return res.status(400).json({ error: "Customer name required" });
+    }
+
+    if (!signature_data_url) {
+      return res.status(400).json({ error: "Signature required" });
+    }
+
+    const customerRow = await findOrCreateCustomer({
+      ...customer,
+      is_minor: Boolean(is_minor),
+    });
+
+    let guardianCustomerId: string | null = null;
+
+    if (is_minor) {
+      if (!guardian?.first_name || !guardian?.last_name) {
+        return res.status(400).json({ error: "Guardian required for minor" });
+      }
+
+      const guardianRow = await findOrCreateCustomer({
+        ...guardian,
+        is_minor: false,
+      });
+
+      guardianCustomerId = guardianRow.id;
+    }
+
+    const signedAt = new Date();
+    const expiresAt = new Date(signedAt);
+    expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+
+    const waiverVersionHash = "v1";
+
+    const { data: waiver, error } = await supabase
+      .schema("texaxes")
+      .from("waivers")
+      .insert({
+        customer_id: customerRow.id,
+        waiver_version_hash: waiverVersionHash,
+        signed_at: signedAt.toISOString(),
+        expires_at: expiresAt.toISOString(),
+        signature_method,
+        ip_address: req.ip || null,
+        user_agent: req.headers["user-agent"] || null,
+        is_minor: Boolean(is_minor),
+        guardian_customer_id: guardianCustomerId,
+      })
+      .select()
+      .single();
+
+    if (error || !waiver) {
+      throw error || new Error("Waiver insert failed");
+    }
+
+    if (booking_id) {
+      await supabase
+        .schema("texaxes")
+        .from("bookings")
+        .update({
+          waiver_status: "signed",
+        })
+        .eq("id", booking_id);
+    }
+
+    await writeAuditLog(
+      "waiver_signed",
+      "waiver",
+      waiver.id,
+      {
+        customer_id: customerRow.id,
+        guardian_customer_id: guardianCustomerId,
+        booking_id: booking_id || null,
+        is_minor: Boolean(is_minor),
+      },
+      "customer"
+    );
+
+    return res.json({
+      success: true,
+      waiver_id: waiver.id,
+      expires_at: expiresAt.toISOString(),
+    });
+  } catch (error) {
+    console.error("POST /api/waivers/sign failed", error);
+    return res.status(500).json({ error: "Waiver signing failed" });
+  }
+});
+
+// ======================================================
 // ADMIN DATE BOARD
 // GET /api/admin/bookings-today?date=YYYY-MM-DD
 // ======================================================
@@ -644,9 +716,7 @@ app.get("/api/admin/bookings-today", async (req, res) => {
       .eq("block_date", date)
       .order("start_time", { ascending: true });
 
-    if (blockError) {
-      throw blockError;
-    }
+    if (blockError) throw blockError;
 
     const timeBlocks = (blockRows || []) as Array<{
       id: string;
@@ -683,9 +753,7 @@ app.get("/api/admin/bookings-today", async (req, res) => {
       .in("start_block_id", blockIds)
       .order("created_at", { ascending: true });
 
-    if (bookingError) {
-      throw bookingError;
-    }
+    if (bookingError) throw bookingError;
 
     const bookings = bookingRows || [];
     const bookingIds = bookings.map((row) => row.id);
@@ -708,13 +776,8 @@ app.get("/api/admin/bookings-today", async (req, res) => {
         .order("created_at", { ascending: false }),
     ]);
 
-    if (customerError) {
-      throw customerError;
-    }
-
-    if (paymentError) {
-      throw paymentError;
-    }
+    if (customerError) throw customerError;
+    if (paymentError) throw paymentError;
 
     const customerMap = new Map((customerRows || []).map((row) => [row.id, row]));
 
@@ -735,11 +798,12 @@ app.get("/api/admin/bookings-today", async (req, res) => {
       }
     }
 
-    const rows: TodayBookingRow[] = bookings
-      .map((booking) => {
+    const rows: TodayBookingRow[] = await Promise.all(
+      bookings.map(async (booking) => {
         const customer = customerMap.get(booking.customer_id);
         const payment = latestPaymentMap.get(booking.id);
         const block = blockMap.get(booking.start_block_id);
+        const waiverStatus = await getWaiverStatusForCustomer(booking.customer_id, date);
 
         return {
           booking_id: booking.id,
@@ -756,7 +820,7 @@ app.get("/api/admin/bookings-today", async (req, res) => {
           booking_source: booking.booking_source || null,
           booking_status: booking.status || "unknown",
           payment_status: payment?.status || "unknown",
-          waiver_status: booking.waiver_status || "unknown",
+          waiver_status: waiverStatus,
           total_amount: Number(booking.total_amount || 0),
           amount_paid: payment?.status === "paid" ? Number(payment.amount || 0) : 0,
           customer_notes: booking.customer_notes || null,
@@ -769,26 +833,28 @@ app.get("/api/admin/bookings-today", async (req, res) => {
           created_at: booking.created_at || null,
         };
       })
-      .sort((a, b) => a.start_time.localeCompare(b.start_time));
+    );
+
+    const sortedRows = rows.sort((a, b) => a.start_time.localeCompare(b.start_time));
 
     const summary = {
-      booking_count: rows.length,
-      paid_count: rows.filter((row) => row.payment_status === "paid").length,
-      unpaid_count: rows.filter((row) => row.payment_status !== "paid").length,
-      checked_in_count: rows.filter((row) => row.booking_status === "checked_in").length,
-      completed_count: rows.filter((row) => row.booking_status === "completed").length,
+      booking_count: sortedRows.length,
+      paid_count: sortedRows.filter((row) => row.payment_status === "paid").length,
+      unpaid_count: sortedRows.filter((row) => row.payment_status !== "paid").length,
+      checked_in_count: sortedRows.filter((row) => row.booking_status === "checked_in").length,
+      completed_count: sortedRows.filter((row) => row.booking_status === "completed").length,
       expected_revenue: roundMoney(
-        rows.reduce((sum, row) => sum + Number(row.total_amount || 0), 0)
+        sortedRows.reduce((sum, row) => sum + Number(row.total_amount || 0), 0)
       ),
       collected_revenue: roundMoney(
-        rows.reduce((sum, row) => sum + Number(row.amount_paid || 0), 0)
+        sortedRows.reduce((sum, row) => sum + Number(row.amount_paid || 0), 0)
       ),
     };
 
     return res.json({
       date,
       summary,
-      bookings: rows,
+      bookings: sortedRows,
     });
   } catch (error) {
     console.error("GET /api/admin/bookings-today failed", error);
@@ -864,7 +930,7 @@ app.post("/api/admin/create-booking", async (req, res) => {
       booking_type: bookingType,
     } as BookingPayload);
 
-    const waiverStatus = deriveWaiverStatus({
+    const waiverStatus = deriveInitialWaiverStatus({
       ...payload,
       booking_source: bookingSource,
       booking_type: bookingType,
@@ -1030,9 +1096,7 @@ app.post("/api/admin/update-booking", async (req, res) => {
         .update(bookingUpdates)
         .eq("id", payload.booking_id);
 
-      if (error) {
-        throw error;
-      }
+      if (error) throw error;
     }
 
     if (Object.keys(paymentUpdates).length > 0) {
@@ -1045,9 +1109,7 @@ app.post("/api/admin/update-booking", async (req, res) => {
           .update(paymentUpdates)
           .eq("id", paymentRow.id);
 
-        if (error) {
-          throw error;
-        }
+        if (error) throw error;
       }
     }
 
@@ -1143,7 +1205,7 @@ app.post("/book", async (req, res) => {
 
     const customer = await findOrCreateCustomer(payload.customer);
     const pricing = computePricing(payload);
-    const waiverStatus = deriveWaiverStatus(payload);
+    const waiverStatus = deriveInitialWaiverStatus(payload);
     const bookingSource = payload.booking_source || "public";
     const bookingType = payload.booking_type || "open";
 
@@ -1315,115 +1377,6 @@ app.post("/book", async (req, res) => {
   } catch (error) {
     console.error("POST /book failed", error);
     return res.status(500).json({ error: "Booking failed" });
-  }
-});
-
-// ======================================================
-// WAIVER SIGN
-// POST /api/waivers/sign
-// ======================================================
-app.post("/api/waivers/sign", async (req, res) => {
-  try {
-    const {
-      customer,
-      is_minor,
-      guardian,
-      signature_data_url,
-      signature_method = "electronic",
-      booking_id,
-    } = req.body;
-
-    if (!customer?.first_name || !customer?.last_name) {
-      return res.status(400).json({ error: "Customer name required" });
-    }
-
-    if (!signature_data_url) {
-      return res.status(400).json({ error: "Signature required" });
-    }
-
-    // 1. create/find customer
-    const customerRow = await findOrCreateCustomer({
-      ...customer,
-      is_minor: Boolean(is_minor),
-    });
-
-    let guardianCustomerId: string | null = null;
-
-    // 2. handle guardian if minor
-    if (is_minor) {
-      if (!guardian?.first_name || !guardian?.last_name) {
-        return res.status(400).json({ error: "Guardian required for minor" });
-      }
-
-      const guardianRow = await findOrCreateCustomer({
-        ...guardian,
-        is_minor: false,
-      });
-
-      guardianCustomerId = guardianRow.id;
-    }
-
-    // 3. compute dates
-    const signedAt = new Date();
-    const expiresAt = new Date(signedAt);
-    expiresAt.setFullYear(expiresAt.getFullYear() + 1);
-
-    // 4. simple version hash (upgrade later if needed)
-    const waiverVersionHash = "v1";
-
-    // 5. insert waiver
-    const { data: waiver, error } = await supabase
-      .schema("texaxes")
-      .from("waivers")
-      .insert({
-        customer_id: customerRow.id,
-        waiver_version_hash: waiverVersionHash,
-        signed_at: signedAt.toISOString(),
-        expires_at: expiresAt.toISOString(),
-        signature_method,
-        ip_address: req.ip || null,
-        user_agent: req.headers["user-agent"] || null,
-        is_minor: Boolean(is_minor),
-        guardian_customer_id: guardianCustomerId,
-      })
-      .select()
-      .single();
-
-    if (error || !waiver) {
-      throw error || new Error("Waiver insert failed");
-    }
-
-    // 6. update booking waiver status (if provided)
-    if (booking_id) {
-      await supabase
-        .schema("texaxes")
-        .from("bookings")
-        .update({
-          waiver_status: "signed",
-        })
-        .eq("id", booking_id);
-    }
-
-    await writeAuditLog(
-      "waiver_signed",
-      "waiver",
-      waiver.id,
-      {
-        customer_id: customerRow.id,
-        booking_id,
-        is_minor,
-      },
-      "customer"
-    );
-
-    return res.json({
-      success: true,
-      waiver_id: waiver.id,
-      expires_at: expiresAt.toISOString(),
-    });
-  } catch (error) {
-    console.error("POST /api/waivers/sign failed", error);
-    return res.status(500).json({ error: "Waiver signing failed" });
   }
 });
 
