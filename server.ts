@@ -9,6 +9,8 @@ const ALLOWED_ORIGINS = [
   "https://texaxes-ui.vercel.app",
   "https://texaxes-ui-git-main-tim-zlomkes-projects.vercel.app",
   "https://texaxes-ui-git-main-zlomke76-del.vercel.app",
+  "https://texaxes-booking-ui.vercel.app",
+  "https://zlomke76-del-texaxes-booking-ui.vercel.app",
   "http://localhost:3000",
 ];
 
