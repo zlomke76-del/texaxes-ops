@@ -26,7 +26,7 @@ app.use((req, res, next) => {
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, stripe-signature");
   res.setHeader("Access-Control-Max-Age", "86400");
 
   if (req.method === "OPTIONS") {
@@ -35,8 +35,6 @@ app.use((req, res, next) => {
 
   return next();
 });
-
-app.use(express.json({ limit: "10mb" }));
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const WAIVER_FROM_EMAIL =
@@ -976,6 +974,450 @@ async function loadTabById(tabId: string) {
 }
 
 // ======================================================
+// STRIPE WEBHOOK HELPERS
+// ======================================================
+async function markBookingPaid(
+  bookingId: string,
+  paymentId: string | null,
+  paymentIntentId: string,
+  checkoutSessionId: string | null,
+  amountReceivedCents: number
+): Promise<void> {
+  const amountReceived = amountReceivedCents / 100;
+
+  if (paymentId) {
+    const { error: paymentError } = await supabase
+      .schema("texaxes")
+      .from("payments")
+      .update({
+        status: "paid",
+        external_payment_id: paymentIntentId,
+        external_checkout_id: checkoutSessionId,
+        paid_at: new Date().toISOString(),
+        amount: amountReceived,
+      })
+      .eq("id", paymentId)
+      .neq("status", "paid");
+
+    if (paymentError) {
+      throw paymentError;
+    }
+  } else {
+    const { data: paymentRow, error: paymentLookupError } = await supabase
+      .schema("texaxes")
+      .from("payments")
+      .select("id, status")
+      .eq("booking_id", bookingId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (paymentLookupError) {
+      throw paymentLookupError;
+    }
+
+    if (paymentRow?.id && paymentRow.status !== "paid") {
+      const { error: paymentUpdateError } = await supabase
+        .schema("texaxes")
+        .from("payments")
+        .update({
+          status: "paid",
+          external_payment_id: paymentIntentId,
+          external_checkout_id: checkoutSessionId,
+          paid_at: new Date().toISOString(),
+          amount: amountReceived,
+        })
+        .eq("id", paymentRow.id);
+
+      if (paymentUpdateError) {
+        throw paymentUpdateError;
+      }
+    }
+  }
+
+  const { error: bookingError } = await supabase
+    .schema("texaxes")
+    .from("bookings")
+    .update({
+      status: "paid",
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_checkout_session_id: checkoutSessionId,
+    })
+    .eq("id", bookingId)
+    .in("status", ["pending", "awaiting_payment", "confirmed"]);
+
+  if (bookingError) {
+    throw bookingError;
+  }
+
+  await writeAuditLog(
+    "booking_paid",
+    "booking",
+    bookingId,
+    {
+      booking_id: bookingId,
+      payment_id: paymentId,
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_checkout_session_id: checkoutSessionId,
+      amount_received_cents: amountReceivedCents,
+    },
+    "webhook"
+  );
+}
+
+async function markLeagueRegistrationPaid(
+  registrationId: string,
+  paymentIntentId: string,
+  checkoutSessionId: string | null,
+  amountReceivedCents: number
+): Promise<void> {
+  const amountReceived = amountReceivedCents / 100;
+
+  const { error } = await supabase
+    .schema("texaxes")
+    .from("league_registrations")
+    .update({
+      status: "paid",
+      payment_status: "paid",
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_checkout_session_id: checkoutSessionId,
+      paid_at: new Date().toISOString(),
+      total_amount_paid: amountReceived,
+    })
+    .eq("id", registrationId)
+    .in("status", ["pending", "awaiting_payment"]);
+
+  if (error) {
+    throw error;
+  }
+
+  await writeAuditLog(
+    "league_registration_paid",
+    "league_registration",
+    registrationId,
+    {
+      league_registration_id: registrationId,
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_checkout_session_id: checkoutSessionId,
+      amount_received_cents: amountReceivedCents,
+    },
+    "webhook"
+  );
+}
+
+async function markPaymentFailed(
+  bookingId: string | null,
+  paymentId: string | null,
+  paymentIntentId: string,
+  checkoutSessionId: string | null,
+  lastPaymentError: string | null
+): Promise<void> {
+  if (paymentId) {
+    const { error: paymentError } = await supabase
+      .schema("texaxes")
+      .from("payments")
+      .update({
+        status: "failed",
+        external_payment_id: paymentIntentId,
+        external_checkout_id: checkoutSessionId,
+      })
+      .eq("id", paymentId)
+      .neq("status", "paid");
+
+    if (paymentError) {
+      throw paymentError;
+    }
+  }
+
+  if (bookingId) {
+    await writeAuditLog(
+      "payment_failed",
+      "booking",
+      bookingId,
+      {
+        booking_id: bookingId,
+        payment_id: paymentId,
+        stripe_payment_intent_id: paymentIntentId,
+        stripe_checkout_session_id: checkoutSessionId,
+        error: lastPaymentError,
+      },
+      "webhook"
+    );
+  }
+}
+
+async function markLeagueRegistrationFailed(
+  registrationId: string | null,
+  paymentIntentId: string,
+  checkoutSessionId: string | null,
+  lastPaymentError: string | null
+): Promise<void> {
+  if (!registrationId) return;
+
+  const { error } = await supabase
+    .schema("texaxes")
+    .from("league_registrations")
+    .update({
+      payment_status: "failed",
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_checkout_session_id: checkoutSessionId,
+    })
+    .eq("id", registrationId)
+    .neq("payment_status", "paid");
+
+  if (error) {
+    throw error;
+  }
+
+  await writeAuditLog(
+    "league_payment_failed",
+    "league_registration",
+    registrationId,
+    {
+      league_registration_id: registrationId,
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_checkout_session_id: checkoutSessionId,
+      error: lastPaymentError,
+    },
+    "webhook"
+  );
+}
+
+async function expireUnpaidBooking(
+  bookingId: string,
+  paymentId: string | null,
+  checkoutSessionId: string
+): Promise<void> {
+  const { error: bookingError } = await supabase
+    .schema("texaxes")
+    .from("bookings")
+    .update({
+      status: "expired",
+    })
+    .eq("id", bookingId)
+    .in("status", ["pending", "awaiting_payment"]);
+
+  if (bookingError) {
+    throw bookingError;
+  }
+
+  if (paymentId) {
+    const { error: paymentError } = await supabase
+      .schema("texaxes")
+      .from("payments")
+      .update({
+        status: "void",
+        external_checkout_id: checkoutSessionId,
+      })
+      .eq("id", paymentId)
+      .neq("status", "paid");
+
+    if (paymentError) {
+      throw paymentError;
+    }
+  }
+
+  await writeAuditLog(
+    "booking_expired",
+    "booking",
+    bookingId,
+    {
+      booking_id: bookingId,
+      payment_id: paymentId,
+      stripe_checkout_session_id: checkoutSessionId,
+    },
+    "webhook"
+  );
+}
+
+async function expireUnpaidLeagueRegistration(
+  registrationId: string,
+  checkoutSessionId: string
+): Promise<void> {
+  const { error } = await supabase
+    .schema("texaxes")
+    .from("league_registrations")
+    .update({
+      status: "expired",
+      payment_status: "void",
+      stripe_checkout_session_id: checkoutSessionId,
+    })
+    .eq("id", registrationId)
+    .in("status", ["pending", "awaiting_payment"]);
+
+  if (error) {
+    throw error;
+  }
+
+  await writeAuditLog(
+    "league_registration_expired",
+    "league_registration",
+    registrationId,
+    {
+      league_registration_id: registrationId,
+      stripe_checkout_session_id: checkoutSessionId,
+    },
+    "webhook"
+  );
+}
+
+// ======================================================
+// STRIPE WEBHOOK
+// IMPORTANT: MUST BE REGISTERED BEFORE express.json()
+// ======================================================
+app.post(
+  "/api/stripe-webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    if (!stripe) {
+      return res.status(500).send("Stripe is not configured");
+    }
+
+    const signature = req.headers["stripe-signature"];
+    if (!signature || typeof signature !== "string") {
+      return res.status(400).send("Missing stripe-signature header");
+    }
+
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || "";
+    if (!webhookSecret) {
+      return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
+    }
+
+    try {
+      const rawBody = req.body as Buffer;
+
+      let event: Stripe.Event;
+      try {
+        event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
+      } catch (err: any) {
+        console.error("Stripe webhook signature verification failed", err);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+      }
+
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object as Stripe.Checkout.Session;
+
+          const bookingId = session.metadata?.booking_id || null;
+          const leagueRegistrationId = session.metadata?.league_registration_id || null;
+          const paymentId = session.metadata?.payment_id || null;
+
+          const paymentIntentId =
+            typeof session.payment_intent === "string"
+              ? session.payment_intent
+              : session.payment_intent?.id || null;
+
+          if (!paymentIntentId) {
+            return res.status(400).send("Missing payment intent");
+          }
+
+          if (bookingId) {
+            await markBookingPaid(
+              bookingId,
+              paymentId,
+              paymentIntentId,
+              session.id,
+              session.amount_total || 0
+            );
+          }
+
+          if (leagueRegistrationId) {
+            await markLeagueRegistrationPaid(
+              leagueRegistrationId,
+              paymentIntentId,
+              session.id,
+              session.amount_total || 0
+            );
+          }
+
+          if (!bookingId && !leagueRegistrationId) {
+            return res.status(400).send("Missing booking or league registration metadata");
+          }
+
+          break;
+        }
+
+        case "payment_intent.succeeded": {
+          const paymentIntent = event.data.object as Stripe.PaymentIntent;
+
+          const bookingId = paymentIntent.metadata?.booking_id || null;
+          const leagueRegistrationId = paymentIntent.metadata?.league_registration_id || null;
+          const paymentId = paymentIntent.metadata?.payment_id || null;
+
+          if (bookingId) {
+            await markBookingPaid(
+              bookingId,
+              paymentId,
+              paymentIntent.id,
+              null,
+              paymentIntent.amount_received || paymentIntent.amount || 0
+            );
+          }
+
+          if (leagueRegistrationId) {
+            await markLeagueRegistrationPaid(
+              leagueRegistrationId,
+              paymentIntent.id,
+              null,
+              paymentIntent.amount_received || paymentIntent.amount || 0
+            );
+          }
+
+          break;
+        }
+
+        case "payment_intent.payment_failed": {
+          const paymentIntent = event.data.object as Stripe.PaymentIntent;
+
+          const bookingId = paymentIntent.metadata?.booking_id || null;
+          const leagueRegistrationId = paymentIntent.metadata?.league_registration_id || null;
+          const paymentId = paymentIntent.metadata?.payment_id || null;
+          const message = paymentIntent.last_payment_error?.message || null;
+
+          await markPaymentFailed(bookingId, paymentId, paymentIntent.id, null, message);
+          await markLeagueRegistrationFailed(
+            leagueRegistrationId,
+            paymentIntent.id,
+            null,
+            message
+          );
+          break;
+        }
+
+        case "checkout.session.expired": {
+          const session = event.data.object as Stripe.Checkout.Session;
+
+          const bookingId = session.metadata?.booking_id || null;
+          const leagueRegistrationId = session.metadata?.league_registration_id || null;
+          const paymentId = session.metadata?.payment_id || null;
+
+          if (bookingId) {
+            await expireUnpaidBooking(bookingId, paymentId, session.id);
+          }
+
+          if (leagueRegistrationId) {
+            await expireUnpaidLeagueRegistration(leagueRegistrationId, session.id);
+          }
+
+          break;
+        }
+
+        default:
+          break;
+      }
+
+      return res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Stripe webhook failed", error);
+      return res.status(500).send("Webhook handler failed");
+    }
+  }
+);
+
+// IMPORTANT: JSON parsing comes after Stripe webhook route
+app.use(express.json({ limit: "10mb" }));
+
+// ======================================================
 // HEALTH
 // ======================================================
 app.get("/health", (_req, res) => {
@@ -1204,13 +1646,13 @@ app.get("/api/admin/bookings-today", async (req, res) => {
     }
 
     const { data: bookingRows, error: bookingError } = await supabase
-  .schema("texaxes")
-  .from("bookings")
-  .select(
-    "id, customer_id, booking_source, booking_type, status, start_block_id, party_size, bays_allocated, allocation_mode, total_amount, tax_amount, customer_notes, internal_notes, created_at"
-  )
-  .in("start_block_id", blockIds)
-  .order("created_at", { ascending: true });
+      .schema("texaxes")
+      .from("bookings")
+      .select(
+        "id, customer_id, booking_source, booking_type, status, start_block_id, party_size, bays_allocated, allocation_mode, total_amount, tax_amount, customer_notes, internal_notes, created_at"
+      )
+      .in("start_block_id", blockIds)
+      .order("created_at", { ascending: true });
 
     if (bookingError) throw bookingError;
 
@@ -1324,10 +1766,10 @@ app.get("/api/admin/bookings-today", async (req, res) => {
               ? null
               : Number(booking.bays_allocated),
           created_at: booking.created_at || null,
-              tax_exempt: null,
-              tax_exempt_reason: null,
-              tax_exempt_status: null,
-              tax_exempt_form_collected_at: null,
+          tax_exempt: null,
+          tax_exempt_reason: null,
+          tax_exempt_status: null,
+          tax_exempt_form_collected_at: null,
         };
       })
     );
@@ -1926,31 +2368,31 @@ app.get("/api/admin/list-open-tabs", async (req, res) => {
       tabs,
     });
   } catch (error: any) {
-  console.error(
-    "GET /api/admin/list-open-tabs failed FULL",
-    JSON.stringify(
-      {
+    console.error(
+      "GET /api/admin/list-open-tabs failed FULL",
+      JSON.stringify(
+        {
+          message: error?.message || null,
+          details: error?.details || null,
+          hint: error?.hint || null,
+          code: error?.code || null,
+          stack: error?.stack || null,
+        },
+        null,
+        2
+      )
+    );
+
+    return res.status(500).json({
+      error: error?.message || "Failed to load tabs",
+      debug: {
         message: error?.message || null,
         details: error?.details || null,
         hint: error?.hint || null,
         code: error?.code || null,
-        stack: error?.stack || null,
       },
-      null,
-      2
-    )
-  );
-
-  return res.status(500).json({
-    error: error?.message || "Failed to load tabs",
-    debug: {
-      message: error?.message || null,
-      details: error?.details || null,
-      hint: error?.hint || null,
-      code: error?.code || null,
-    },
-  });
-}
+    });
+  }
 });
 
 app.post("/api/admin/add-line-item", async (req, res) => {
