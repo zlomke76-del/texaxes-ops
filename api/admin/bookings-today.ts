@@ -122,7 +122,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         status,
         total_amount,
         tax_amount,
-        amount_paid,
         bays_allocated,
         allocation_mode,
         internal_notes,
@@ -161,6 +160,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
+    const bookingIds = rows.map((row: any) => row.id);
     const customerIds = [...new Set(rows.map((row: any) => row.customer_id).filter(Boolean))];
 
     const customerMap = new Map<string, any>();
@@ -181,6 +181,30 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       for (const customer of customerRows || []) {
         customerMap.set(customer.id, customer);
+      }
+    }
+
+    const paymentMap = new Map<string, number>();
+    if (bookingIds.length > 0) {
+      const { data: paymentRows, error: paymentsError } = await supabase
+        .schema("texaxes")
+        .from("payments")
+        .select("booking_id, amount, status")
+        .in("booking_id", bookingIds);
+
+      if (paymentsError) {
+        console.error(
+          "bookings-today payments query error",
+          JSON.stringify(paymentsError, null, 2)
+        );
+        return res.status(500).json({ error: "Failed to fetch payments" });
+      }
+
+      for (const payment of paymentRows || []) {
+        if (payment.status === "paid") {
+          const current = paymentMap.get(payment.booking_id) || 0;
+          paymentMap.set(payment.booking_id, current + Number(payment.amount || 0));
+        }
       }
     }
 
@@ -247,6 +271,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const customer = customerMap.get(row.customer_id) || {};
         const block = blockMap.get(row.start_block_id) || {};
         const requiredWaivers = Math.max(0, Number(row.party_size || 0));
+        const amountPaid = paymentMap.get(row.id) || 0;
 
         const waiverCount = waiverCounts.get(row.id) || {
           signed: 0,
@@ -280,7 +305,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           booking_status: row.status || "pending",
           payment_status:
-            Number(row.amount_paid || 0) >= Number(row.total_amount || 0) &&
+            amountPaid >= Number(row.total_amount || 0) &&
             Number(row.total_amount || 0) > 0
               ? "paid"
               : "pending",
@@ -294,7 +319,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           total_amount: Number(row.total_amount || 0),
           tax_amount: Number(row.tax_amount || 0),
-          amount_paid: Number(row.amount_paid || 0),
+          amount_paid: amountPaid,
 
           customer_notes: row.customer_notes || null,
           internal_notes: row.internal_notes || null,
@@ -341,21 +366,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       bookings,
     });
   } catch (err: any) {
-  console.error(
-    "bookings-today failed FULL",
-    JSON.stringify(
-      {
-        message: err?.message,
-        details: err?.details,
-        hint: err?.hint,
-        code: err?.code,
-        stack: err?.stack,
-        err,
-      },
-      null,
-      2
-    )
-  );
+    console.error(
+      "bookings-today failed FULL",
+      JSON.stringify(
+        {
+          message: err?.message,
+          details: err?.details,
+          hint: err?.hint,
+          code: err?.code,
+          stack: err?.stack,
+          err,
+        },
+        null,
+        2
+      )
+    );
 
-  return res.status(200).json({ marker: "dedicated-route-file" });
+    return res.status(500).json({ error: err?.message || "Failed to load today bookings" });
+  }
 }
