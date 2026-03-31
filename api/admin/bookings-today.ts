@@ -221,7 +221,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const { data: waiverRows, error: waiverError } = await supabase
         .schema("texaxes")
         .from("waivers")
-        .select("customer_id, expires_at, is_minor, parent_customer_id")
+        .select("customer_id, expires_at, is_minor, guardian_customer_id")
         .in("customer_id", customerIds);
 
       if (waiverError) {
@@ -249,7 +249,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           const expiresAt = waiver.expires_at ? new Date(waiver.expires_at) : null;
           const isExpired = !expiresAt || expiresAt < validOnOrAfter;
-          const needsGuardian = Boolean(waiver.is_minor) && !waiver.parent_customer_id;
+          const needsGuardian =
+            Boolean(waiver.is_minor) && !waiver.guardian_customer_id;
 
           if (needsGuardian) {
             current.guardianRequired += 1;
