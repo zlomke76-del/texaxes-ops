@@ -951,6 +951,7 @@ async function markBookingPaid(
   amountReceivedCents: number
 ): Promise<void> {
   const amountReceived = amountReceivedCents / 100;
+  const paidAtIso = new Date().toISOString();
 
   if (paymentId) {
     const { error: paymentError } = await supabase
@@ -960,7 +961,7 @@ async function markBookingPaid(
         status: "paid",
         external_payment_id: paymentIntentId,
         external_checkout_id: checkoutSessionId,
-        paid_at: new Date().toISOString(),
+        paid_at: paidAtIso,
         amount: amountReceived,
       })
       .eq("id", paymentId)
@@ -991,7 +992,7 @@ async function markBookingPaid(
           status: "paid",
           external_payment_id: paymentIntentId,
           external_checkout_id: checkoutSessionId,
-          paid_at: new Date().toISOString(),
+          paid_at: paidAtIso,
           amount: amountReceived,
         })
         .eq("id", paymentRow.id);
@@ -1016,6 +1017,7 @@ async function markBookingPaid(
   if (bookingError) {
     throw bookingError;
   }
+
   const { data: paidBooking, error: paidBookingLookupError } = await supabase
     .schema("texaxes")
     .from("bookings")
@@ -1033,7 +1035,7 @@ async function markBookingPaid(
       .from("customer_offers")
       .update({
         status: "redeemed",
-        redeemed_at: new Date().toISOString(),
+        redeemed_at: paidAtIso,
         redeemed_booking_id: bookingId,
       })
       .eq("code", paidBooking.offer_code)
@@ -1043,7 +1045,7 @@ async function markBookingPaid(
       throw offerRedeemError;
     }
   }
-  
+
   await writeAuditLog(
     "booking_paid",
     "booking",
@@ -1054,6 +1056,7 @@ async function markBookingPaid(
       stripe_payment_intent_id: paymentIntentId,
       stripe_checkout_session_id: checkoutSessionId,
       amount_received_cents: amountReceivedCents,
+      offer_code: paidBooking?.offer_code || null,
     },
     "webhook"
   );
