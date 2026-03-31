@@ -15,5 +15,11 @@
       "src": "/(.*)",
       "dest": "server.ts"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/admin/send-thank-you-emails",
+      "schedule": "0 10 * * *"
+    }
   ]
 }
