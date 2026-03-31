@@ -1,14 +1,27 @@
 import Stripe from "stripe";
+import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
   apiVersion: "2023-10-16",
 });
 
+const resend = process.env.RESEND_API_KEY
+  ? new Resend(process.env.RESEND_API_KEY)
+  : null;
+
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
+
+const FRONTEND_URL = (process.env.FRONTEND_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
+const WAIVER_FROM_EMAIL =
+  process.env.WAIVER_FROM_EMAIL || "Tex Axes <onboarding@resend.dev>";
+const INTERNAL_BOOKING_EMAIL = "texaxes@outlook.com";
 
 const PRICE_PER_THROWER = 29;
 const TAX_RATE = 0.0825;
@@ -101,13 +114,19 @@ type PricingResult = {
   }>;
 };
 
+type EmailSendResult = {
+  sent: boolean;
+  error: string | null;
+};
+
 function setCors(req: any, res: any) {
   const origin = req.headers.origin || "";
 
   if (
     origin.includes("vercel.app") ||
     origin.includes("localhost") ||
-    origin.includes("127.0.0.1")
+    origin.includes("127.0.0.1") ||
+    origin.includes("texaxes.com")
   ) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
@@ -214,6 +233,20 @@ function deriveWaiverStatus(
   customer: BookingPayload["customer"]
 ): "missing" | "guardian_required" {
   return customer.is_minor ? "guardian_required" : "missing";
+}
+
+function formatDisplayTime(time: string): string {
+  return time.slice(0, 5);
+}
+
+function formatMoney(value: number): string {
+  return `$${Number(value || 0).toFixed(2)}`;
+}
+
+function buildWaiverUrl(bookingId: string, customerId: string): string {
+  return `${FRONTEND_URL}/waiver?booking_id=${encodeURIComponent(
+    bookingId
+  )}&customer_id=${encodeURIComponent(customerId)}`;
 }
 
 async function getWaiverStatusForCustomer(
@@ -458,6 +491,253 @@ async function getAddonCatalogMap(): Promise<Map<string, string>> {
   return out;
 }
 
+async function sendCustomerBookingEmail(params: {
+  to: string | null;
+  bookingId: string;
+  customerName: string;
+  date: string;
+  time: string;
+  partySize: number;
+  totalAmount: number;
+  checkoutUrl: string | null;
+  waiverUrl: string;
+  bookingSource: string;
+}): Promise<EmailSendResult> {
+  try {
+    if (!params.to) {
+      return { sent: false, error: "missing_customer_email" };
+    }
+
+    if (!resend) {
+      return { sent: false, error: "resend_not_configured" };
+    }
+
+    const subject = `Your Tex Axes booking for ${params.date} at ${formatDisplayTime(
+      params.time
+    )}`;
+
+    const text = [
+      `Hi ${params.customerName},`,
+      "",
+      "Thanks for booking with Tex Axes.",
+      "",
+      `Booking ID: ${params.bookingId}`,
+      `Date: ${params.date}`,
+      `Time: ${formatDisplayTime(params.time)}`,
+      `Party Size: ${params.partySize}`,
+      `Total: ${formatMoney(params.totalAmount)}`,
+      "",
+      params.checkoutUrl ? "Complete payment here:" : null,
+      params.checkoutUrl || null,
+      "",
+      "Complete your waiver before arrival:",
+      params.waiverUrl,
+      "",
+      "We look forward to seeing you at Tex Axes.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const html = `
+      <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#111827;">
+        <p>Hi ${params.customerName},</p>
+        <p>Thanks for booking with <strong>Tex Axes</strong>.</p>
+        <p>
+          <strong>Booking ID:</strong> ${params.bookingId}<br />
+          <strong>Date:</strong> ${params.date}<br />
+          <strong>Time:</strong> ${formatDisplayTime(params.time)}<br />
+          <strong>Party Size:</strong> ${params.partySize}<br />
+          <strong>Total:</strong> ${formatMoney(params.totalAmount)}
+        </p>
+        ${
+          params.checkoutUrl
+            ? `<p><a href="${params.checkoutUrl}" style="display:inline-block;padding:12px 18px;background:#111827;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;">Complete Payment</a></p>
+               <p style="word-break:break-all;color:#4b5563;">${params.checkoutUrl}</p>`
+            : ""
+        }
+        <p><a href="${params.waiverUrl}" style="display:inline-block;padding:12px 18px;background:#f97316;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;">Complete Waiver</a></p>
+        <p style="word-break:break-all;color:#4b5563;">${params.waiverUrl}</p>
+        <p>We look forward to seeing you at Tex Axes.</p>
+      </div>
+    `;
+
+    const { error } = await resend.emails.send({
+      from: WAIVER_FROM_EMAIL,
+      to: params.to,
+      subject,
+      text,
+      html,
+    });
+
+    if (error) {
+      return { sent: false, error: error.message || "customer_booking_email_failed" };
+    }
+
+    return { sent: true, error: null };
+  } catch (error: any) {
+    return {
+      sent: false,
+      error: error?.message || "customer_booking_email_failed",
+    };
+  }
+}
+
+async function sendCustomerWaiverEmail(params: {
+  to: string | null;
+  customerName: string;
+  waiverUrl: string;
+  date: string;
+  time: string;
+}): Promise<EmailSendResult> {
+  try {
+    if (!params.to) {
+      return { sent: false, error: "missing_customer_email" };
+    }
+
+    if (!resend) {
+      return { sent: false, error: "resend_not_configured" };
+    }
+
+    const subject = "Complete Your Tex Axes Waiver";
+
+    const text = [
+      `Hi ${params.customerName},`,
+      "",
+      "Please complete your Tex Axes waiver before arrival.",
+      `Booking time: ${params.date} at ${formatDisplayTime(params.time)}`,
+      "",
+      params.waiverUrl,
+      "",
+      "If the waiver is for a minor participant, a parent or legal guardian must complete it.",
+    ].join("\n");
+
+    const html = `
+      <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#111827;">
+        <p>Hi ${params.customerName},</p>
+        <p>Please complete your Tex Axes waiver before arrival.</p>
+        <p><strong>Booking time:</strong> ${params.date} at ${formatDisplayTime(
+          params.time
+        )}</p>
+        <p>
+          <a href="${params.waiverUrl}" style="display:inline-block;padding:12px 18px;background:#f97316;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;">
+            Complete Waiver
+          </a>
+        </p>
+        <p style="word-break:break-all;color:#4b5563;">${params.waiverUrl}</p>
+        <p>If the waiver is for a minor participant, a parent or legal guardian must complete it.</p>
+      </div>
+    `;
+
+    const { error } = await resend.emails.send({
+      from: WAIVER_FROM_EMAIL,
+      to: params.to,
+      subject,
+      text,
+      html,
+    });
+
+    if (error) {
+      return { sent: false, error: error.message || "customer_waiver_email_failed" };
+    }
+
+    return { sent: true, error: null };
+  } catch (error: any) {
+    return {
+      sent: false,
+      error: error?.message || "customer_waiver_email_failed",
+    };
+  }
+}
+
+async function sendInternalBookingEmail(params: {
+  bookingId: string;
+  customerName: string;
+  customerEmail: string | null;
+  customerPhone: string | null;
+  date: string;
+  time: string;
+  partySize: number;
+  totalAmount: number;
+  bookingSource: string;
+  bookingType: string;
+  taxExempt: boolean;
+  taxExemptReason: string | null;
+  customerNotes: string | null;
+  internalNotes: string | null;
+}): Promise<EmailSendResult> {
+  try {
+    if (!resend) {
+      return { sent: false, error: "resend_not_configured" };
+    }
+
+    const subject = `New Tex Axes Booking — ${params.date} ${formatDisplayTime(
+      params.time
+    )}`;
+
+    const text = [
+      "New Tex Axes booking created.",
+      "",
+      `Booking ID: ${params.bookingId}`,
+      `Customer: ${params.customerName}`,
+      `Email: ${params.customerEmail || "none"}`,
+      `Phone: ${params.customerPhone || "none"}`,
+      `Date: ${params.date}`,
+      `Time: ${formatDisplayTime(params.time)}`,
+      `Party Size: ${params.partySize}`,
+      `Total: ${formatMoney(params.totalAmount)}`,
+      `Source: ${params.bookingSource}`,
+      `Type: ${params.bookingType}`,
+      `Tax Exempt: ${params.taxExempt ? "Yes" : "No"}`,
+      params.taxExemptReason ? `Tax Exempt Reason: ${params.taxExemptReason}` : null,
+      params.customerNotes ? `Customer Notes: ${params.customerNotes}` : null,
+      params.internalNotes ? `Internal Notes: ${params.internalNotes}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const html = `
+      <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#111827;">
+        <h2>New Tex Axes Booking</h2>
+        <p>
+          <strong>Booking ID:</strong> ${params.bookingId}<br />
+          <strong>Customer:</strong> ${params.customerName}<br />
+          <strong>Email:</strong> ${params.customerEmail || "none"}<br />
+          <strong>Phone:</strong> ${params.customerPhone || "none"}<br />
+          <strong>Date:</strong> ${params.date}<br />
+          <strong>Time:</strong> ${formatDisplayTime(params.time)}<br />
+          <strong>Party Size:</strong> ${params.partySize}<br />
+          <strong>Total:</strong> ${formatMoney(params.totalAmount)}<br />
+          <strong>Source:</strong> ${params.bookingSource}<br />
+          <strong>Type:</strong> ${params.bookingType}<br />
+          <strong>Tax Exempt:</strong> ${params.taxExempt ? "Yes" : "No"}
+        </p>
+        ${params.taxExemptReason ? `<p><strong>Tax Exempt Reason:</strong> ${params.taxExemptReason}</p>` : ""}
+        ${params.customerNotes ? `<p><strong>Customer Notes:</strong><br />${params.customerNotes.replace(/\n/g, "<br />")}</p>` : ""}
+        ${params.internalNotes ? `<p><strong>Internal Notes:</strong><br />${params.internalNotes.replace(/\n/g, "<br />")}</p>` : ""}
+      </div>
+    `;
+
+    const { error } = await resend.emails.send({
+      from: WAIVER_FROM_EMAIL,
+      to: INTERNAL_BOOKING_EMAIL,
+      subject,
+      text,
+      html,
+    });
+
+    if (error) {
+      return { sent: false, error: error.message || "internal_booking_email_failed" };
+    }
+
+    return { sent: true, error: null };
+  } catch (error: any) {
+    return {
+      sent: false,
+      error: error?.message || "internal_booking_email_failed",
+    };
+  }
+}
+
 export default async function handler(req: any, res: any) {
   setCors(req, res);
 
@@ -554,6 +834,7 @@ export default async function handler(req: any, res: any) {
     const pricing = computePricing(payload, taxExempt);
     const waiverStatus = deriveWaiverStatus(payload.customer);
     const internalNotes = buildInternalNotes(payload, taxExempt);
+    const customerNotes = normalizeOptionalText(payload.customer_notes);
 
     const { data: booking, error: bookingError } = await supabase
       .schema("texaxes")
@@ -575,7 +856,7 @@ export default async function handler(req: any, res: any) {
         total_amount: pricing.total_amount,
         waiver_status: waiverStatus,
         internal_notes: internalNotes,
-        customer_notes: payload.customer_notes || null,
+        customer_notes: customerNotes,
         created_by: bookingSource,
         tax_exempt: taxExempt,
         tax_exempt_reason: taxExempt
@@ -688,8 +969,8 @@ export default async function handler(req: any, res: any) {
           quantity: 1,
         },
       ],
-      success_url: `${process.env.FRONTEND_URL}/success?booking_id=${booking.id}`,
-      cancel_url: `${process.env.FRONTEND_URL}/cancel?booking_id=${booking.id}`,
+      success_url: `${FRONTEND_URL}/success?booking_id=${booking.id}`,
+      cancel_url: `${FRONTEND_URL}/cancel?booking_id=${booking.id}`,
     });
 
     const { error: bookingUpdateError } = await supabase
@@ -718,6 +999,48 @@ export default async function handler(req: any, res: any) {
       return res.status(500).json({ error: "Payment session update failed" });
     }
 
+    const waiverUrl = buildWaiverUrl(booking.id, customer.id);
+
+    const customerBookingEmail = await sendCustomerBookingEmail({
+      to: customer.email,
+      bookingId: booking.id,
+      customerName: `${customer.first_name} ${customer.last_name}`.trim(),
+      date,
+      time,
+      partySize: throwers,
+      totalAmount: pricing.total_amount,
+      checkoutUrl: session.url,
+      waiverUrl,
+      bookingSource,
+    });
+
+    const customerWaiverEmail = await sendCustomerWaiverEmail({
+      to: customer.email,
+      customerName: `${customer.first_name} ${customer.last_name}`.trim(),
+      waiverUrl,
+      date,
+      time,
+    });
+
+    const internalBookingEmail = await sendInternalBookingEmail({
+      bookingId: booking.id,
+      customerName: `${customer.first_name} ${customer.last_name}`.trim(),
+      customerEmail: customer.email,
+      customerPhone: customer.phone,
+      date,
+      time,
+      partySize: throwers,
+      totalAmount: pricing.total_amount,
+      bookingSource,
+      bookingType,
+      taxExempt,
+      taxExemptReason: taxExempt
+        ? normalizeOptionalText(payload.tax_exempt_reason)
+        : null,
+      customerNotes,
+      internalNotes,
+    });
+
     await writeAuditLog("booking_created", "booking", booking.id, {
       booking_id: booking.id,
       customer_id: customer.id,
@@ -732,11 +1055,19 @@ export default async function handler(req: any, res: any) {
         ? normalizeOptionalText(payload.tax_exempt_reason)
         : null,
       tax_exempt_status: taxExemptStatus,
+      customer_booking_email_sent: customerBookingEmail.sent,
+      customer_booking_email_error: customerBookingEmail.error,
+      customer_waiver_email_sent: customerWaiverEmail.sent,
+      customer_waiver_email_error: customerWaiverEmail.error,
+      internal_booking_email_sent: internalBookingEmail.sent,
+      internal_booking_email_error: internalBookingEmail.error,
     });
 
     return res.status(200).json({
       booking_id: booking.id,
+      customer_id: customer.id,
       checkout_url: session.url,
+      waiver_url: waiverUrl,
       totals: {
         base_price: pricing.base_price,
         addons_subtotal: pricing.addons_subtotal,
@@ -755,6 +1086,14 @@ export default async function handler(req: any, res: any) {
         ? normalizeOptionalText(payload.tax_exempt_reason)
         : null,
       tax_exempt_status: taxExemptStatus,
+      emails: {
+        customer_booking_sent: customerBookingEmail.sent,
+        customer_booking_error: customerBookingEmail.error,
+        customer_waiver_sent: customerWaiverEmail.sent,
+        customer_waiver_error: customerWaiverEmail.error,
+        internal_booking_sent: internalBookingEmail.sent,
+        internal_booking_error: internalBookingEmail.error,
+      },
     });
   } catch (error) {
     console.error("POST /api/book failed", error);
