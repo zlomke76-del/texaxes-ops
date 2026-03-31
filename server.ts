@@ -2022,18 +2022,17 @@ app.post("/api/admin/update-booking", async (req, res) => {
     if (payload.booking_status) {
       bookingUpdates.status = payload.booking_status;
 
-      // 🔥 NEW: schedule thank-you email
+      // Schedule thank-you email for next day at 10:00 AM
       if (payload.booking_status === "completed") {
         const now = new Date();
         const scheduled = new Date(now);
         scheduled.setDate(scheduled.getDate() + 1);
+        scheduled.setHours(10, 0, 0, 0);
 
-    // normalize to 10 AM next day
-    scheduled.setHours(10, 0, 0, 0);
-
-    bookingUpdates.thank_you_email_scheduled_for = scheduled.toISOString();
-  }
-}
+        bookingUpdates.thank_you_email_scheduled_for = scheduled.toISOString();
+        bookingUpdates.thank_you_email_sent_at = null;
+      }
+    }
 
     if (typeof payload.internal_notes === "string") {
       bookingUpdates.internal_notes = payload.internal_notes;
@@ -2119,7 +2118,6 @@ app.post("/api/admin/update-booking", async (req, res) => {
     return res.status(500).json({ error: "Failed to update booking" });
   }
 });
-
 // ======================================================
 // TABS / POS
 // ======================================================
