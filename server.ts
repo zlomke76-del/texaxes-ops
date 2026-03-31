@@ -1037,7 +1037,34 @@ async function markBookingPaid(
   if (bookingError) {
     throw bookingError;
   }
+  const { data: paidBooking, error: paidBookingLookupError } = await supabase
+    .schema("texaxes")
+    .from("bookings")
+    .select("id, offer_code")
+    .eq("id", bookingId)
+    .maybeSingle();
 
+  if (paidBookingLookupError) {
+    throw paidBookingLookupError;
+  }
+
+  if (paidBooking?.offer_code) {
+    const { error: offerRedeemError } = await supabase
+      .schema("texaxes")
+      .from("customer_offers")
+      .update({
+        status: "redeemed",
+        redeemed_at: new Date().toISOString(),
+        redeemed_booking_id: bookingId,
+      })
+      .eq("code", paidBooking.offer_code)
+      .eq("status", "active");
+
+    if (offerRedeemError) {
+      throw offerRedeemError;
+    }
+  }
+  
   await writeAuditLog(
     "booking_paid",
     "booking",
