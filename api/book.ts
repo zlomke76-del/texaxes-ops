@@ -68,6 +68,7 @@ type BookingPayload = {
   tax_exempt_reason?: string | null;
   tax_exempt_status?: TaxExemptStatus | null;
   tax_exempt_note?: string | null;
+  offer_code?: string | null;
 };
 
 type CustomerRow = {
@@ -117,6 +118,16 @@ type PricingResult = {
 type EmailSendResult = {
   sent: boolean;
   error: string | null;
+};
+
+type CustomerOfferRow = {
+  id: string;
+  code: string;
+  offer_type: string;
+  discount_type: "percent" | "fixed";
+  discount_value: number;
+  status: string;
+  expires_at: string | null;
 };
 
 function setCors(req: any, res: any) {
@@ -363,6 +374,38 @@ function buildInternalNotes(payload: BookingPayload, taxExempt: boolean): string
   return notes.length ? notes.join("\n") : null;
 }
 
+function computeDiscountAmount(
+  pricing: PricingResult,
+  offer: CustomerOfferRow
+): number {
+  if (offer.discount_type === "percent") {
+    return roundMoney(pricing.total_amount * (Number(offer.discount_value || 0) / 100));
+  }
+
+  if (offer.discount_type === "fixed") {
+    return roundMoney(
+      Math.min(pricing.total_amount, Number(offer.discount_value || 0))
+    );
+  }
+
+  return 0;
+}
+
+async function getActiveOfferByCode(code: string): Promise<CustomerOfferRow | null> {
+  const { data, error } = await supabase
+    .schema("texaxes")
+    .from("customer_offers")
+    .select(
+      "id, code, offer_type, discount_type, discount_value, status, expires_at"
+    )
+    .eq("code", code)
+    .eq("status", "active")
+    .maybeSingle<CustomerOfferRow>();
+
+  if (error) throw error;
+  return data ?? null;
+}
+
 async function writeAuditLog(
   action: string,
   entityType: string,
@@ -502,6 +545,8 @@ async function sendCustomerBookingEmail(params: {
   checkoutUrl: string | null;
   waiverUrl: string;
   bookingSource: string;
+  discountAmount?: number;
+  offerCode?: string | null;
 }): Promise<EmailSendResult> {
   try {
     if (!params.to) {
@@ -525,6 +570,10 @@ async function sendCustomerBookingEmail(params: {
       `Date: ${params.date}`,
       `Time: ${formatDisplayTime(params.time)}`,
       `Party Size: ${params.partySize}`,
+      params.discountAmount && params.discountAmount > 0
+        ? `Discount Applied: ${formatMoney(params.discountAmount)}`
+        : null,
+      params.offerCode ? `Offer Code: ${params.offerCode}` : null,
       `Total: ${formatMoney(params.totalAmount)}`,
       "",
       params.checkoutUrl ? "Complete payment here:" : null,
@@ -547,6 +596,16 @@ async function sendCustomerBookingEmail(params: {
           <strong>Date:</strong> ${params.date}<br />
           <strong>Time:</strong> ${formatDisplayTime(params.time)}<br />
           <strong>Party Size:</strong> ${params.partySize}<br />
+          ${
+            params.discountAmount && params.discountAmount > 0
+              ? `<strong>Discount Applied:</strong> ${formatMoney(params.discountAmount)}<br />`
+              : ""
+          }
+          ${
+            params.offerCode
+              ? `<strong>Offer Code:</strong> ${params.offerCode}<br />`
+              : ""
+          }
           <strong>Total:</strong> ${formatMoney(params.totalAmount)}
         </p>
         ${
@@ -664,6 +723,8 @@ async function sendInternalBookingEmail(params: {
   taxExemptReason: string | null;
   customerNotes: string | null;
   internalNotes: string | null;
+  discountAmount?: number;
+  offerCode?: string | null;
 }): Promise<EmailSendResult> {
   try {
     if (!resend) {
@@ -684,6 +745,10 @@ async function sendInternalBookingEmail(params: {
       `Date: ${params.date}`,
       `Time: ${formatDisplayTime(params.time)}`,
       `Party Size: ${params.partySize}`,
+      params.discountAmount && params.discountAmount > 0
+        ? `Discount Applied: ${formatMoney(params.discountAmount)}`
+        : null,
+      params.offerCode ? `Offer Code: ${params.offerCode}` : null,
       `Total: ${formatMoney(params.totalAmount)}`,
       `Source: ${params.bookingSource}`,
       `Type: ${params.bookingType}`,
@@ -706,6 +771,16 @@ async function sendInternalBookingEmail(params: {
           <strong>Date:</strong> ${params.date}<br />
           <strong>Time:</strong> ${formatDisplayTime(params.time)}<br />
           <strong>Party Size:</strong> ${params.partySize}<br />
+          ${
+            params.discountAmount && params.discountAmount > 0
+              ? `<strong>Discount Applied:</strong> ${formatMoney(params.discountAmount)}<br />`
+              : ""
+          }
+          ${
+            params.offerCode
+              ? `<strong>Offer Code:</strong> ${params.offerCode}<br />`
+              : ""
+          }
           <strong>Total:</strong> ${formatMoney(params.totalAmount)}<br />
           <strong>Source:</strong> ${params.bookingSource}<br />
           <strong>Type:</strong> ${params.bookingType}<br />
@@ -831,10 +906,39 @@ export default async function handler(req: any, res: any) {
     const baysAllocated = allocationMode === "preferred" ? preferred : minimum;
 
     const customer = await findOrCreateCustomer(payload.customer);
-    const pricing = computePricing(payload, taxExempt);
+    let pricing = computePricing(payload, taxExempt);
     const waiverStatus = deriveWaiverStatus(payload.customer);
     const internalNotes = buildInternalNotes(payload, taxExempt);
     const customerNotes = normalizeOptionalText(payload.customer_notes);
+
+    let appliedOffer: CustomerOfferRow | null = null;
+    let discountAmount = 0;
+    const normalizedOfferCode = normalizeOptionalText(payload.offer_code)?.toUpperCase() || null;
+
+    if (normalizedOfferCode) {
+      const offer = await getActiveOfferByCode(normalizedOfferCode);
+
+      if (!offer) {
+        return res.status(400).json({ error: "Invalid offer code" });
+      }
+
+      const nowIso = new Date().toISOString();
+      if (offer.expires_at && offer.expires_at < nowIso) {
+        return res.status(400).json({ error: "Offer expired" });
+      }
+
+      discountAmount = computeDiscountAmount(pricing, offer);
+
+      pricing = {
+        ...pricing,
+        total_amount: roundMoney(Math.max(0, pricing.total_amount - discountAmount)),
+      };
+
+      appliedOffer = {
+        ...offer,
+        discount_value: Number(offer.discount_value || 0),
+      };
+    }
 
     const { data: booking, error: bookingError } = await supabase
       .schema("texaxes")
@@ -863,6 +967,7 @@ export default async function handler(req: any, res: any) {
           ? normalizeOptionalText(payload.tax_exempt_reason)
           : null,
         tax_exempt_status: taxExempt ? taxExemptStatus : null,
+        offer_code: appliedOffer?.code || null,
       })
       .select()
       .single();
@@ -945,6 +1050,9 @@ export default async function handler(req: any, res: any) {
         booking_source: bookingSource,
         tax_exempt: String(taxExempt),
         tax_exempt_status: taxExemptStatus || "",
+        offer_code: appliedOffer?.code || "",
+        customer_offer_id: appliedOffer?.id || "",
+        discount_amount: String(discountAmount || 0),
       },
       payment_intent_data: {
         metadata: {
@@ -954,6 +1062,9 @@ export default async function handler(req: any, res: any) {
           booking_source: bookingSource,
           tax_exempt: String(taxExempt),
           tax_exempt_status: taxExemptStatus || "",
+          offer_code: appliedOffer?.code || "",
+          customer_offer_id: appliedOffer?.id || "",
+          discount_amount: String(discountAmount || 0),
         },
       },
       line_items: [
@@ -962,7 +1073,9 @@ export default async function handler(req: any, res: any) {
             currency: "usd",
             product_data: {
               name: taxExempt ? "Tex Axes Booking (Tax Exempt)" : "Tex Axes Booking",
-              description: `${date} ${time.slice(0, 5)} · ${throwers} thrower(s)`,
+              description: `${date} ${time.slice(0, 5)} · ${throwers} thrower(s)${
+                appliedOffer ? ` · Offer ${appliedOffer.code}` : ""
+              }`,
             },
             unit_amount: Math.round(pricing.total_amount * 100),
           },
@@ -1012,6 +1125,8 @@ export default async function handler(req: any, res: any) {
       checkoutUrl: session.url,
       waiverUrl,
       bookingSource,
+      discountAmount,
+      offerCode: appliedOffer?.code || null,
     });
 
     const customerWaiverEmail = await sendCustomerWaiverEmail({
@@ -1039,6 +1154,8 @@ export default async function handler(req: any, res: any) {
         : null,
       customerNotes,
       internalNotes,
+      discountAmount,
+      offerCode: appliedOffer?.code || null,
     });
 
     await writeAuditLog("booking_created", "booking", booking.id, {
@@ -1055,6 +1172,9 @@ export default async function handler(req: any, res: any) {
         ? normalizeOptionalText(payload.tax_exempt_reason)
         : null,
       tax_exempt_status: taxExemptStatus,
+      offer_code: appliedOffer?.code || null,
+      customer_offer_id: appliedOffer?.id || null,
+      discount_amount: discountAmount,
       customer_booking_email_sent: customerBookingEmail.sent,
       customer_booking_email_error: customerBookingEmail.error,
       customer_waiver_email_sent: customerWaiverEmail.sent,
@@ -1073,6 +1193,7 @@ export default async function handler(req: any, res: any) {
         addons_subtotal: pricing.addons_subtotal,
         subtotal: pricing.subtotal,
         tax_amount: pricing.tax_amount,
+        discount_amount: discountAmount,
         total_amount: pricing.total_amount,
       },
       allocation: {
@@ -1086,6 +1207,15 @@ export default async function handler(req: any, res: any) {
         ? normalizeOptionalText(payload.tax_exempt_reason)
         : null,
       tax_exempt_status: taxExemptStatus,
+      offer: appliedOffer
+        ? {
+            id: appliedOffer.id,
+            code: appliedOffer.code,
+            discount_type: appliedOffer.discount_type,
+            discount_value: appliedOffer.discount_value,
+            expires_at: appliedOffer.expires_at,
+          }
+        : null,
       emails: {
         customer_booking_sent: customerBookingEmail.sent,
         customer_booking_error: customerBookingEmail.error,
