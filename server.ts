@@ -3070,4 +3070,116 @@ app.post("/book", async (req, res) => {
   }
 });
 
+// ======================================================
+// SEND THANK-YOU EMAILS (NEXT DAY FOLLOW-UP)
+// ======================================================
+app.post("/api/admin/send-thank-you-emails", async (req, res) => {
+  try {
+    const nowIso = new Date().toISOString();
+
+    // 1. Get all bookings ready to send
+    const { data: bookings, error } = await supabase
+      .schema("texaxes")
+      .from("bookings")
+      .select(`
+        id,
+        customer_id,
+        thank_you_email_scheduled_for,
+        thank_you_email_sent_at,
+        customers (
+          email,
+          first_name
+        )
+      `)
+      .not("thank_you_email_scheduled_for", "is", null)
+      .is("thank_you_email_sent_at", null)
+      .lte("thank_you_email_scheduled_for", nowIso);
+
+    if (error) throw error;
+
+    if (!bookings || bookings.length === 0) {
+      return res.json({
+        success: true,
+        processed: 0,
+        sent: 0,
+      });
+    }
+
+    let sentCount = 0;
+
+    // 2. Process each booking
+    for (const booking of bookings) {
+      const email = booking.customers?.email?.trim();
+      const firstName = booking.customers?.first_name || "there";
+
+      if (!email) {
+        continue; // skip if no email
+      }
+
+      try {
+        const emailContent = buildThankYouEmail({
+          firstName,
+          couponCode: "THANKYOU20",
+          discountLabel: "20% off",
+          validDays: 30,
+        });
+
+        const { error: sendError } = await resend.emails.send({
+          from: WAIVER_FROM_EMAIL,
+          to: email,
+          subject: emailContent.subject,
+          text: emailContent.text,
+          html: emailContent.html,
+        });
+
+        if (sendError) {
+          console.error("Thank-you email failed", sendError);
+          continue;
+        }
+
+        // 3. Mark as sent
+        const { error: updateError } = await supabase
+          .schema("texaxes")
+          .from("bookings")
+          .update({
+            thank_you_email_sent_at: new Date().toISOString(),
+          })
+          .eq("id", booking.id);
+
+        if (updateError) {
+          console.error("Failed to mark thank-you email sent", updateError);
+          continue;
+        }
+
+        // 4. Audit log
+        await writeAuditLog(
+          "thank_you_email_sent",
+          "booking",
+          booking.id,
+          {
+            booking_id: booking.id,
+            email,
+          },
+          "system"
+        );
+
+        sentCount++;
+      } catch (innerError) {
+        console.error("Error processing thank-you email", innerError);
+      }
+    }
+
+    return res.json({
+      success: true,
+      processed: bookings.length,
+      sent: sentCount,
+    });
+  } catch (error) {
+    console.error("POST /api/admin/send-thank-you-emails failed", error);
+    return res.status(500).json({
+      error: "Failed to send thank-you emails",
+    });
+  }
+});
+
 export default app;
