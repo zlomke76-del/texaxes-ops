@@ -2,6 +2,11 @@ import express from "express";
 import Stripe from "stripe";
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
+import { buildBookingCustomerEmail } from "@/lib/email/bookingCustomer";
+import { buildBookingInternalEmail } from "@/lib/email/bookingInternal";
+import { buildWaiverEmail } from "@/lib/email/waiver";
+import { buildThankYouEmail } from "@/lib/email/thankYou";
+import { buildMarketingEmail } from "@/lib/email/marketing";
 
 const app = express();
 
@@ -544,52 +549,35 @@ async function sendWaiverEmail(params: {
         ? `${params.bookingDate} at ${params.bookingTime.slice(0, 5)}`
         : null;
 
-    const subject = "Complete Your Tex Axes Waiver";
+async function sendWaiverEmail(params: {
+  to: string | null | undefined;
+  firstName: string;
+  waiverUrl: string;
+  bookingDate?: string;
+  bookingTime?: string;
+}): Promise<WaiverEmailResult> {
+  try {
+    if (!params.to || !params.to.trim()) {
+      return { sent: false, error: "missing_email" };
+    }
 
-    const text = [
-      `Hi ${params.firstName || "there"},`,
-      "",
-      "Your Tex Axes booking is in our system.",
-      formattedDateTime ? `Booking time: ${formattedDateTime}` : null,
-      "",
-      "Please complete your waiver before arrival:",
-      params.waiverUrl,
-      "",
-      "If this waiver is being completed for a minor participant, a parent or legal guardian must complete it.",
-      "",
-      "Thank you,",
-      "Tex Axes",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    if (!resend) {
+      return { sent: false, error: "resend_not_configured" };
+    }
 
-    const html = `
-      <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#111827;">
-        <p>Hi ${params.firstName || "there"},</p>
-        <p>Your Tex Axes booking is in our system.</p>
-        ${
-          formattedDateTime
-            ? `<p><strong>Booking time:</strong> ${formattedDateTime}</p>`
-            : ""
-        }
-        <p>Please complete your waiver before arrival:</p>
-        <p>
-          <a href="${params.waiverUrl}" style="display:inline-block;padding:12px 18px;background:#f97316;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;">
-            Complete Waiver
-          </a>
-        </p>
-        <p style="word-break:break-all;color:#4b5563;">${params.waiverUrl}</p>
-        <p>If this waiver is being completed for a minor participant, a parent or legal guardian must complete it.</p>
-        <p>Thank you,<br />Tex Axes</p>
-      </div>
-    `;
+    const email = buildWaiverEmail({
+      firstName: params.firstName,
+      waiverUrl: params.waiverUrl,
+      bookingDate: params.bookingDate,
+      bookingTime: params.bookingTime,
+    });
 
     const { error } = await resend.emails.send({
       from: WAIVER_FROM_EMAIL,
       to: params.to.trim(),
-      subject,
-      text,
-      html,
+      subject: email.subject,
+      text: email.text,
+      html: email.html,
     });
 
     if (error) {
