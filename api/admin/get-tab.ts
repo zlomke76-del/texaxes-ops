@@ -71,9 +71,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           status,
           party_size,
           total_amount,
-          tax_exempt,
-          tax_exempt_reason,
-          tax_exempt_status,
           customer_notes,
           internal_notes
         )
