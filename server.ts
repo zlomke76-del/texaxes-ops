@@ -544,27 +544,6 @@ async function sendWaiverEmail(params: {
       return { sent: false, error: "resend_not_configured" };
     }
 
-    const formattedDateTime =
-      params.bookingDate && params.bookingTime
-        ? `${params.bookingDate} at ${params.bookingTime.slice(0, 5)}`
-        : null;
-
-async function sendWaiverEmail(params: {
-  to: string | null | undefined;
-  firstName: string;
-  waiverUrl: string;
-  bookingDate?: string;
-  bookingTime?: string;
-}): Promise<WaiverEmailResult> {
-  try {
-    if (!params.to || !params.to.trim()) {
-      return { sent: false, error: "missing_email" };
-    }
-
-    if (!resend) {
-      return { sent: false, error: "resend_not_configured" };
-    }
-
     const email = buildWaiverEmail({
       firstName: params.firstName,
       waiverUrl: params.waiverUrl,
