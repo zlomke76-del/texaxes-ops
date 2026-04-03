@@ -3148,15 +3148,7 @@ for (const booking of bookings) {
       html: emailContent.html,
     });
 
-        const { error: sendError } = await resend.emails.send({
-          from: WAIVER_FROM_EMAIL,
-          to: email,
-          subject: emailContent.subject,
-          text: emailContent.text,
-          html: emailContent.html,
-        });
-
-        if (sendError) {
+          if (sendError) {
           console.error("Thank-you email failed", sendError);
           continue;
         }
