@@ -2,11 +2,11 @@ import express from "express";
 import Stripe from "stripe";
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
-import { buildBookingCustomerEmail } from "./lib/email/bookingCustomer";
-import { buildBookingInternalEmail } from "./lib/email/bookingInternal";
-import { buildWaiverEmail } from "./lib/email/waiver";
-import { buildThankYouEmail } from "./lib/email/thankYou";
-import { buildMarketingEmail } from "./lib/email/marketing";
+import { buildBookingCustomerEmail } from "./lib/email/bookingCustomer.js";
+import { buildBookingInternalEmail } from "./lib/email/bookingInternal.js";
+import { buildWaiverEmail } from "./lib/email/waiver.js";
+import { buildThankYouEmail } from "./lib/email/thankYou.js";
+import { buildMarketingEmail } from "./lib/email/marketing.js";
 
 const app = express();
 
