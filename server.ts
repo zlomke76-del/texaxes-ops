@@ -3120,23 +3120,33 @@ app.post("/api/admin/send-thank-you-emails", async (req, res) => {
     let sentCount = 0;
 
     // 2. Process each booking
-    for (const booking of bookings) {
-      const customer = booking.customers?.[0];
-        customer?.email
-        customer?.first_name
-      const firstName = booking.customers?.first_name || "there";
+for (const booking of bookings) {
+  const customer = Array.isArray(booking.customers)
+    ? booking.customers[0]
+    : booking.customers;
 
-      if (!email) {
-        continue; // skip if no email
-      }
+  const email = customer?.email?.trim();
+  const firstName = customer?.first_name || "there";
 
-      try {
-        const emailContent = buildThankYouEmail({
-          firstName,
-          couponCode: "THANKYOU20",
-          discountLabel: "20% off",
-          validDays: 30,
-        });
+  if (!email) {
+    continue; // skip if no email
+  }
+
+  try {
+    const emailContent = buildThankYouEmail({
+      firstName,
+      couponCode: "THANKYOU20",
+      discountLabel: "20% off",
+      validDays: 30,
+    });
+
+    const { error: sendError } = await resend.emails.send({
+      from: WAIVER_FROM_EMAIL,
+      to: email,
+      subject: emailContent.subject,
+      text: emailContent.text,
+      html: emailContent.html,
+    });
 
         const { error: sendError } = await resend.emails.send({
           from: WAIVER_FROM_EMAIL,
