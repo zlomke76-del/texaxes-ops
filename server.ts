@@ -10,10 +10,14 @@ import { buildMarketingEmail } from "@/lib/email/marketing";
 
 const app = express();
 
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const ALLOWED_ORIGINS = [
+  "https://book.texaxes.com",
+  "https://texaxes-ui.vercel.app",
+  "https://texaxes-ui-git-main-tim-zlomkes-projects.vercel.app",
+  "https://texaxes-ui-git-main-zlomke76-del.vercel.app",
+  "https://texaxes-booking-ui.vercel.app",
+  "https://zlomke76-del-texaxes-booking-ui.vercel.app",
+  "http://localhost:3000",
 ];
 
 // ======================================================
