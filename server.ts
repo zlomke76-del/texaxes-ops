@@ -2815,7 +2815,7 @@ app.post("/api/admin/void-payment", async (req, res) => {
 // ======================================================
 // PUBLIC BOOKING
 // ======================================================
-app.post("/book", async (req, res) => {
+app.post("/api/book", async (req, res) => {
   try {
     if (!stripe) {
       return res.status(500).json({ error: "Stripe is not configured" });
