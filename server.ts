@@ -51,7 +51,7 @@ const WAIVER_FROM_EMAIL =
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY || "";
 const stripe = stripeSecretKey
   ? new Stripe(stripeSecretKey, {
-      apiVersion: "2024-06-20",
+      apiVersion: "2023-10-16",
     })
   : null;
 
@@ -3121,7 +3121,9 @@ app.post("/api/admin/send-thank-you-emails", async (req, res) => {
 
     // 2. Process each booking
     for (const booking of bookings) {
-      const email = booking.customers?.email?.trim();
+      const customer = booking.customers?.[0];
+        customer?.email
+        customer?.first_name
       const firstName = booking.customers?.first_name || "there";
 
       if (!email) {
