@@ -11,6 +11,8 @@ import { buildMarketingEmail } from "@/lib/email/marketing";
 const app = express();
 
 const ALLOWED_ORIGINS = [
+  "https://www.texaxes.com",
+  "https://texaxes.com",
   "https://book.texaxes.com",
   "https://texaxes-ui.vercel.app",
   "https://texaxes-ui-git-main-tim-zlomkes-projects.vercel.app",
