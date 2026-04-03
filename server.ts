@@ -1425,7 +1425,7 @@ app.get("/health", (_req, res) => {
 // ======================================================
 // AVAILABILITY
 // ======================================================
-app.get("/availability", async (req, res) => {
+app.get("/api/availability", async (req, res) => {
   try {
     const { date, throwers } = req.query as AvailabilityQuery;
 
