@@ -2890,6 +2890,20 @@ app.post("/api/book", async (req, res) => {
     const bookingSource = payload.booking_source || "public";
     const bookingType = payload.booking_type || "open";
 
+    const rawFrontendUrl = String(process.env.FRONTEND_URL || "").trim();
+    if (!rawFrontendUrl) {
+      console.error("Missing FRONTEND_URL");
+      return res.status(500).json({ error: "Booking frontend URL is not configured" });
+    }
+
+    let frontendBase: string;
+    try {
+      frontendBase = new URL(rawFrontendUrl).toString().replace(/\/+$/, "");
+    } catch (urlError) {
+      console.error("Invalid FRONTEND_URL", rawFrontendUrl, urlError);
+      return res.status(500).json({ error: "Booking frontend URL is invalid" });
+    }
+
     const { data: booking, error: bookingError } = await supabase
       .schema("texaxes")
       .from("bookings")
@@ -2972,6 +2986,9 @@ app.post("/api/book", async (req, res) => {
       return res.status(500).json({ error: "Payment record insert failed" });
     }
 
+    const successUrl = `${frontendBase}/success?booking_id=${booking.id}`;
+    const cancelUrl = `${frontendBase}/cancel?booking_id=${booking.id}`;
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -3003,8 +3020,8 @@ app.post("/api/book", async (req, res) => {
           quantity: 1,
         },
       ],
-      success_url: `${FRONTEND_URL}/success?booking_id=${booking.id}`,
-      cancel_url: `${FRONTEND_URL}/cancel?booking_id=${booking.id}`,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
     });
 
     const { error: bookingUpdateError } = await supabase
@@ -3053,6 +3070,8 @@ app.post("/api/book", async (req, res) => {
       booking_source: bookingSource,
       waiver_email_sent: waiverEmailResult.sent,
       waiver_email_error: waiverEmailResult.error,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
     });
 
     return res.json({
@@ -3077,7 +3096,7 @@ app.post("/api/book", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("POST /book failed", error);
+    console.error("POST /api/book failed", error);
     return res.status(500).json({ error: "Booking failed" });
   }
 });
