@@ -1512,7 +1512,8 @@ app.post("/api/waivers/sign", async (req, res) => {
       signature_data_url,
       signature_method = "electronic",
       booking_id,
-    } = req.body as WaiverSignPayload;
+      customer_id,
+    } = req.body as WaiverSignPayload & { customer_id?: string | null };
 
     if (!customer?.first_name || !customer?.last_name) {
       return res.status(400).json({ error: "Customer name required" });
@@ -1522,10 +1523,104 @@ app.post("/api/waivers/sign", async (req, res) => {
       return res.status(400).json({ error: "Signature required" });
     }
 
-    const customerRow = await findOrCreateCustomer({
-      ...customer,
-      is_minor: Boolean(is_minor),
-    });
+    let bookingRecord:
+      | {
+          id: string;
+          customer_id: string;
+          party_size: number | null;
+          start_block_id: string | null;
+        }
+      | null = null;
+
+    let bookingDate: string | null = null;
+    let bookingPartySize = 1;
+
+    if (booking_id) {
+      const { data: booking, error: bookingError } = await supabase
+        .schema("texaxes")
+        .from("bookings")
+        .select("id, customer_id, party_size, start_block_id")
+        .eq("id", booking_id)
+        .maybeSingle();
+
+      if (bookingError) {
+        throw bookingError;
+      }
+
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      bookingRecord = {
+        id: booking.id,
+        customer_id: booking.customer_id,
+        party_size:
+          booking.party_size === null || booking.party_size === undefined
+            ? 1
+            : Number(booking.party_size),
+        start_block_id: booking.start_block_id,
+      };
+
+      bookingPartySize = Math.max(1, Number(bookingRecord.party_size || 1));
+
+      if (bookingRecord.start_block_id) {
+        const { data: timeBlock, error: timeBlockError } = await supabase
+          .schema("texaxes")
+          .from("time_blocks")
+          .select("block_date")
+          .eq("id", bookingRecord.start_block_id)
+          .maybeSingle();
+
+        if (timeBlockError) {
+          throw timeBlockError;
+        }
+
+        bookingDate = timeBlock?.block_date || null;
+      }
+    }
+
+    let customerRow: CustomerRow;
+
+    if (customer_id) {
+      const { data: existingCustomer, error: customerLookupError } = await supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id, first_name, last_name, email, phone")
+        .eq("id", customer_id)
+        .maybeSingle<CustomerRow>();
+
+      if (customerLookupError) {
+        throw customerLookupError;
+      }
+
+      if (!existingCustomer) {
+        return res.status(404).json({ error: "Customer not found" });
+      }
+
+      customerRow = existingCustomer;
+    } else if (bookingRecord?.customer_id) {
+      const { data: bookingCustomer, error: bookingCustomerError } = await supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id, first_name, last_name, email, phone")
+        .eq("id", bookingRecord.customer_id)
+        .maybeSingle<CustomerRow>();
+
+      if (bookingCustomerError) {
+        throw bookingCustomerError;
+      }
+
+      if (!bookingCustomer) {
+        return res.status(404).json({ error: "Booking customer not found" });
+      }
+
+      customerRow = bookingCustomer;
+    } else {
+      customerRow = await findOrCreateCustomer({
+        ...customer,
+        is_minor: Boolean(is_minor),
+      });
+    }
 
     let guardianCustomerId: string | null = null;
 
@@ -1575,6 +1670,40 @@ app.post("/api/waivers/sign", async (req, res) => {
       throw error || new Error("Waiver insert failed");
     }
 
+    if (booking_id) {
+      let nextWaiverStatus:
+        | "complete"
+        | "partial"
+        | "missing"
+        | "guardian_required"
+        | "expired" = "complete";
+
+      if (bookingDate) {
+        const summary = await getWaiverSummaryForBooking(
+          booking_id,
+          customerRow.id,
+          bookingDate,
+          bookingPartySize
+        );
+        nextWaiverStatus = summary.waiver_status;
+      } else {
+        nextWaiverStatus =
+          Boolean(is_minor) && !guardianCustomerId ? "guardian_required" : "complete";
+      }
+
+      const { error: bookingUpdateError } = await supabase
+        .schema("texaxes")
+        .from("bookings")
+        .update({
+          waiver_status: nextWaiverStatus,
+        })
+        .eq("id", booking_id);
+
+      if (bookingUpdateError) {
+        throw bookingUpdateError;
+      }
+    }
+
     await writeAuditLog(
       "waiver_signed",
       "waiver",
@@ -1591,6 +1720,8 @@ app.post("/api/waivers/sign", async (req, res) => {
     return res.json({
       success: true,
       waiver_id: waiver.id,
+      customer_id: customerRow.id,
+      booking_id: booking_id || null,
       expires_at: expiresAt.toISOString(),
     });
   } catch (error) {
@@ -1598,7 +1729,6 @@ app.post("/api/waivers/sign", async (req, res) => {
     return res.status(500).json({ error: "Waiver signing failed" });
   }
 });
-
 // ======================================================
 // ADMIN DATE BOARD
 // ======================================================
