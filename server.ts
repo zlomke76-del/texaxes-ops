@@ -45,6 +45,8 @@ app.use((req, res, next) => {
 });
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+const WAIVER_FRONTEND_URL =
+  process.env.WAIVER_FRONTEND_URL || "https://texaxes-ui.vercel.app";
 const WAIVER_FROM_EMAIL =
   process.env.WAIVER_FROM_EMAIL || "Tex Axes <onboarding@resend.dev>";
 
@@ -67,7 +69,6 @@ if (!supabaseUrl || !supabaseServiceRoleKey) {
 }
 
 const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
-
 // ======================================================
 // CONFIG
 // ======================================================
@@ -473,7 +474,7 @@ function deriveInitialWaiverStatus(
 }
 
 function buildWaiverUrl(bookingId: string, customerId: string): string {
-  const base = FRONTEND_URL.replace(/\/+$/, "");
+  const base = WAIVER_FRONTEND_URL.replace(/\/+$/, "");
   return `${base}/waiver?booking_id=${encodeURIComponent(
     bookingId
   )}&customer_id=${encodeURIComponent(customerId)}`;
