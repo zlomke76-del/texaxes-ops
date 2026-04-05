@@ -265,7 +265,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    const frontendUrl = (process.env.FRONTEND_URL || "").replace(/\/+$/, "");
+    const waiverFrontendUrl = (
+  process.env.WAIVER_FRONTEND_URL ||
+  process.env.FRONTEND_URL ||
+  ""
+).replace(/\/+$/, "");
 
     const bookings = rows
       .map((row: any) => {
@@ -314,9 +318,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           waiver_required: requiredWaivers,
           waiver_signed: waiverCount.signed,
           waiver_status: waiverStatus,
-          waiver_url: frontendUrl
-            ? `${frontendUrl}/waiver?booking_id=${row.id}&customer_id=${row.customer_id}`
-            : null,
+          waiver_url: waiverFrontendUrl
+                ? `${waiverFrontendUrl}/waiver?booking_id=${row.id}&customer_id=${row.customer_id}`
+                : null,
 
           total_amount: Number(row.total_amount || 0),
           tax_amount: Number(row.tax_amount || 0),
