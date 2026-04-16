@@ -19,6 +19,9 @@ type CapacityRow = {
   total_bays: number;
   bays_used: number;
   bays_open: number;
+  display_time?: string;
+  capacity_window?: string;
+  derived_half_hour?: boolean;
 };
 
 type SlotState = "available" | "limited" | "full";
@@ -69,18 +72,10 @@ function computeBayRequirements(throwers: number) {
   };
 }
 
-function hhmmToMinutes(value: string): number {
-  const [hours, minutes] = value.slice(0, 5).split(":").map(Number);
-  return hours * 60 + minutes;
-}
-
-function minutesToHHMM(totalMinutes: number): string {
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
-}
-
-function getSlotState(row: CapacityRow, partySize: number | null): {
+function getSlotState(
+  row: CapacityRow,
+  partySize: number | null
+): {
   state: SlotState;
   preferred_bays_required?: number;
   minimum_bays_required?: number;
@@ -113,20 +108,6 @@ function getSlotState(row: CapacityRow, partySize: number | null): {
     preferred_bays_required: preferred,
     minimum_bays_required: minimum,
   };
-}
-
-function buildSlotTimes(row: CapacityRow): string[] {
-  const start = hhmmToMinutes(row.start_time);
-  const end = hhmmToMinutes(row.end_time);
-  const duration = end - start;
-
-  const times = [minutesToHHMM(start)];
-
-  if (duration >= 60) {
-    times.push(minutesToHHMM(start + 30));
-  }
-
-  return times;
 }
 
 export default async function handler(req: any, res: any) {
@@ -179,22 +160,23 @@ export default async function handler(req: any, res: any) {
 
     const slots = rows
       .filter((row) => row.is_open && row.is_bookable)
-      .flatMap((row) => {
+      .map((row) => {
         const slotMeta = getSlotState(row, partySize);
-        const slotTimes = buildSlotTimes(row);
 
-        return slotTimes.map((slotStart, index) => ({
+        return {
           time_block_id: row.time_block_id,
-          slot_key: `${row.time_block_id}:${slotStart}`,
-          start: slotStart,
+          slot_key: `${row.time_block_id}:${row.start_time}`,
+          start: row.start_time.slice(0, 5),
           end: row.end_time.slice(0, 5),
           open_bays: row.bays_open,
           total_bays: row.total_bays,
           state: slotMeta.state,
           preferred_bays_required: slotMeta.preferred_bays_required,
           minimum_bays_required: slotMeta.minimum_bays_required,
-          derived_half_hour: index > 0,
-        }));
+          display_time: row.display_time || row.start_time.slice(0, 5),
+          capacity_window: row.capacity_window,
+          derived_half_hour: row.derived_half_hour ?? false,
+        };
       });
 
     return res.status(200).json({
