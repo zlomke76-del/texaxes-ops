@@ -164,9 +164,9 @@ export default async function handler(req: any, res: any) {
 
     const { data, error } = await supabase
       .schema("texaxes")
-      .from("v_block_capacity")
+      .from("v_block_capacity_halfhour")
       .select(
-        "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
+        "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open, display_time, capacity_window, derived_half_hour"
       )
       .eq("block_date", normalizedDate)
       .order("start_time", { ascending: true });
