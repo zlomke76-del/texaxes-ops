@@ -679,7 +679,7 @@ async function getTimeBlock(date: string, time: string): Promise<TimeBlockRow | 
 async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
   const { data, error } = await supabase
     .schema("texaxes")
-    .from("v_block_capacity")
+    .from("v_block_capacity_halfhour")
     .select(
       "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
     )
@@ -693,7 +693,7 @@ async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
 async function getCapacityRowForBlock(timeBlockId: string): Promise<CapacityRow | null> {
   const { data, error } = await supabase
     .schema("texaxes")
-    .from("v_block_capacity")
+    .from("v_block_capacity_halfhour")
     .select(
       "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
     )
@@ -1443,6 +1443,7 @@ app.get("/api/availability", async (req, res) => {
       if (!Number.isInteger(partySize) || partySize <= 0) {
         return res.status(400).json({ error: "Invalid throwers" });
       }
+
       if (partySize > PUBLIC_MAX_PARTY_SIZE) {
         return res.status(400).json({
           error:
@@ -1463,11 +1464,15 @@ app.get("/api/availability", async (req, res) => {
 
           return {
             time_block_id: row.time_block_id,
+            slot_key: `${row.time_block_id}:${row.start_time}`,
             start: row.start_time.slice(0, 5),
             end: row.end_time.slice(0, 5),
             open_bays: row.bays_open,
             total_bays: row.total_bays,
             state: genericState,
+            display_time: row.display_time || row.start_time.slice(0, 5),
+            capacity_window: row.capacity_window || null,
+            derived_half_hour: row.derived_half_hour ?? false,
           };
         }
 
@@ -1480,6 +1485,7 @@ app.get("/api/availability", async (req, res) => {
 
         return {
           time_block_id: row.time_block_id,
+          slot_key: `${row.time_block_id}:${row.start_time}`,
           start: row.start_time.slice(0, 5),
           end: row.end_time.slice(0, 5),
           open_bays: row.bays_open,
@@ -1487,6 +1493,9 @@ app.get("/api/availability", async (req, res) => {
           preferred_bays_required: preferred,
           minimum_bays_required: minimum,
           state,
+          display_time: row.display_time || row.start_time.slice(0, 5),
+          capacity_window: row.capacity_window || null,
+          derived_half_hour: row.derived_half_hour ?? false,
         };
       });
 
