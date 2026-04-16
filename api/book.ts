@@ -28,6 +28,7 @@ const TAX_RATE = 0.0825;
 const PUBLIC_MAX_PARTY_SIZE = 24;
 const PREFERRED_THROWERS_PER_BAY = 4;
 const MAX_THROWERS_PER_BAY = 6;
+const MAX_PUBLIC_DURATION_HOURS = 3;
 
 const ADDON_PRICES = {
   byob: 5,
@@ -43,6 +44,7 @@ type BookingPayload = {
   date: string;
   time: string;
   throwers: number;
+  duration_hours?: number;
   customer: {
     first_name: string;
     last_name: string;
@@ -219,6 +221,16 @@ function normalizeTaxExemptStatus(
   return null;
 }
 
+function normalizeDurationHours(value?: number | string | null): number {
+  const duration = Number(value || 1);
+
+  if (!Number.isInteger(duration) || duration < 1 || duration > MAX_PUBLIC_DURATION_HOURS) {
+    throw new Error(`Duration must be between 1 and ${MAX_PUBLIC_DURATION_HOURS} hours`);
+  }
+
+  return duration;
+}
+
 function computeBayRequirements(throwers: number) {
   return {
     preferred: Math.ceil(throwers / PREFERRED_THROWERS_PER_BAY),
@@ -289,11 +301,15 @@ async function getWaiverStatusForCustomer(
   return "signed";
 }
 
-function computePricing(payload: BookingPayload, taxExempt: boolean): PricingResult {
+function computePricing(
+  payload: BookingPayload,
+  taxExempt: boolean,
+  durationHours: number
+): PricingResult {
   const throwers = Number(payload.throwers || 0);
   const addons = payload.addons || {};
 
-  const base_price = roundMoney(throwers * PRICE_PER_THROWER);
+  const base_price = roundMoney(throwers * PRICE_PER_THROWER * durationHours);
 
   const addon_lines = [
     {
@@ -347,8 +363,14 @@ function computePricing(payload: BookingPayload, taxExempt: boolean): PricingRes
   };
 }
 
-function buildInternalNotes(payload: BookingPayload, taxExempt: boolean): string | null {
+function buildInternalNotes(
+  payload: BookingPayload,
+  taxExempt: boolean,
+  durationHours: number
+): string | null {
   const notes: string[] = [];
+
+  notes.push(`[BOOKING DURATION] ${durationHours} hour${durationHours === 1 ? "" : "s"}`);
 
   if (taxExempt) {
     notes.push("[TAX EXEMPT]");
@@ -518,6 +540,35 @@ async function getCapacityRowForBlock(timeBlockId: string): Promise<CapacityRow 
   return data ?? null;
 }
 
+async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
+  const { data, error } = await supabase
+    .schema("texaxes")
+    .from("v_block_capacity")
+    .select(
+      "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
+    )
+    .eq("block_date", date)
+    .order("start_time", { ascending: true });
+
+  if (error) throw error;
+  return (data || []) as CapacityRow[];
+}
+
+async function getConsecutiveCapacityRows(
+  date: string,
+  startTime: string,
+  blockCount: number
+): Promise<CapacityRow[]> {
+  const rows = await getCapacityRowsForDate(date);
+  const startIndex = rows.findIndex((row) => row.start_time === startTime);
+
+  if (startIndex === -1) {
+    return [];
+  }
+
+  return rows.slice(startIndex, startIndex + blockCount);
+}
+
 async function getAddonCatalogMap(): Promise<Map<string, string>> {
   const { data, error } = await supabase
     .schema("texaxes")
@@ -540,6 +591,7 @@ async function sendCustomerBookingEmail(params: {
   customerName: string;
   date: string;
   time: string;
+  durationHours: number;
   partySize: number;
   totalAmount: number;
   checkoutUrl: string | null;
@@ -569,6 +621,7 @@ async function sendCustomerBookingEmail(params: {
       `Booking ID: ${params.bookingId}`,
       `Date: ${params.date}`,
       `Time: ${formatDisplayTime(params.time)}`,
+      `Duration: ${params.durationHours} hour${params.durationHours === 1 ? "" : "s"}`,
       `Party Size: ${params.partySize}`,
       params.discountAmount && params.discountAmount > 0
         ? `Discount Applied: ${formatMoney(params.discountAmount)}`
@@ -595,6 +648,7 @@ async function sendCustomerBookingEmail(params: {
           <strong>Booking ID:</strong> ${params.bookingId}<br />
           <strong>Date:</strong> ${params.date}<br />
           <strong>Time:</strong> ${formatDisplayTime(params.time)}<br />
+          <strong>Duration:</strong> ${params.durationHours} hour${params.durationHours === 1 ? "" : "s"}<br />
           <strong>Party Size:</strong> ${params.partySize}<br />
           ${
             params.discountAmount && params.discountAmount > 0
@@ -715,6 +769,7 @@ async function sendInternalBookingEmail(params: {
   customerPhone: string | null;
   date: string;
   time: string;
+  durationHours: number;
   partySize: number;
   totalAmount: number;
   bookingSource: string;
@@ -744,6 +799,7 @@ async function sendInternalBookingEmail(params: {
       `Phone: ${params.customerPhone || "none"}`,
       `Date: ${params.date}`,
       `Time: ${formatDisplayTime(params.time)}`,
+      `Duration: ${params.durationHours} hour${params.durationHours === 1 ? "" : "s"}`,
       `Party Size: ${params.partySize}`,
       params.discountAmount && params.discountAmount > 0
         ? `Discount Applied: ${formatMoney(params.discountAmount)}`
@@ -770,6 +826,7 @@ async function sendInternalBookingEmail(params: {
           <strong>Phone:</strong> ${params.customerPhone || "none"}<br />
           <strong>Date:</strong> ${params.date}<br />
           <strong>Time:</strong> ${formatDisplayTime(params.time)}<br />
+          <strong>Duration:</strong> ${params.durationHours} hour${params.durationHours === 1 ? "" : "s"}<br />
           <strong>Party Size:</strong> ${params.partySize}<br />
           ${
             params.discountAmount && params.discountAmount > 0
@@ -838,6 +895,7 @@ export default async function handler(req: any, res: any) {
     const date = normalizeDate(payload.date);
     const time = normalizeTime(payload.time);
     const throwers = Number(payload.throwers);
+    const durationHours = normalizeDurationHours(payload.duration_hours);
     const bookingSource = payload.booking_source || "public";
     const bookingType = payload.booking_type || "open";
 
@@ -882,33 +940,47 @@ export default async function handler(req: any, res: any) {
       return res.status(400).json({ error: "Invalid or unavailable time slot" });
     }
 
-    const capacity = await getCapacityRowForBlock(timeBlock.id);
-    if (!capacity || !capacity.is_open || !capacity.is_bookable) {
-      return res.status(400).json({ error: "Capacity record not found for slot" });
+    const selectedBlocks = await getConsecutiveCapacityRows(date, time, durationHours);
+
+    if (selectedBlocks.length !== durationHours) {
+      return res.status(400).json({
+        error: "Selected duration is not available for that start time",
+      });
     }
 
     const { preferred, minimum } = computeBayRequirements(throwers);
 
-    if (capacity.bays_open < minimum) {
-      return res.status(409).json({
-        error: "Slot no longer available",
-        details: {
-          open_bays: capacity.bays_open,
-          minimum_bays_required: minimum,
-          preferred_bays_required: preferred,
-        },
-      });
+    for (const block of selectedBlocks) {
+      if (!block.is_open || !block.is_bookable) {
+        return res.status(400).json({
+          error: "One or more time blocks are unavailable",
+        });
+      }
+
+      if (block.bays_open < minimum) {
+        return res.status(409).json({
+          error: "Insufficient capacity for full duration",
+          details: {
+            failed_block_start: block.start_time.slice(0, 5),
+            open_bays: block.bays_open,
+            minimum_bays_required: minimum,
+            preferred_bays_required: preferred,
+          },
+        });
+      }
     }
 
+    const minOpenBays = Math.min(...selectedBlocks.map((block) => block.bays_open));
+
     const allocationMode: "preferred" | "dense" =
-      capacity.bays_open >= preferred ? "preferred" : "dense";
+      minOpenBays >= preferred ? "preferred" : "dense";
 
     const baysAllocated = allocationMode === "preferred" ? preferred : minimum;
 
     const customer = await findOrCreateCustomer(payload.customer);
-    let pricing = computePricing(payload, taxExempt);
+    let pricing = computePricing(payload, taxExempt, durationHours);
     const waiverStatus = deriveWaiverStatus(payload.customer);
-    const internalNotes = buildInternalNotes(payload, taxExempt);
+    const internalNotes = buildInternalNotes(payload, taxExempt, durationHours);
     const customerNotes = normalizeOptionalText(payload.customer_notes);
 
     let appliedOffer: CustomerOfferRow | null = null;
@@ -949,7 +1021,7 @@ export default async function handler(req: any, res: any) {
         booking_type: bookingType,
         status: "awaiting_payment",
         start_block_id: timeBlock.id,
-        block_count: 1,
+        block_count: durationHours,
         party_size: throwers,
         bays_allocated: baysAllocated,
         allocation_mode: allocationMode,
@@ -977,8 +1049,10 @@ export default async function handler(req: any, res: any) {
       return res.status(500).json({ error: "Booking insert failed" });
     }
 
-    const postInsertCapacity = await getCapacityRowForBlock(timeBlock.id);
-    if (postInsertCapacity && postInsertCapacity.bays_open < 0) {
+    const postInsertBlocks = await getConsecutiveCapacityRows(date, time, durationHours);
+    const overbooked = postInsertBlocks.some((block) => block.bays_open < 0);
+
+    if (overbooked) {
       await supabase.schema("texaxes").from("bookings").delete().eq("id", booking.id);
 
       return res.status(409).json({
@@ -1048,6 +1122,7 @@ export default async function handler(req: any, res: any) {
         payment_id: paymentRow.id,
         customer_id: customer.id,
         booking_source: bookingSource,
+        booking_duration_hours: String(durationHours),
         tax_exempt: String(taxExempt),
         tax_exempt_status: taxExemptStatus || "",
         offer_code: appliedOffer?.code || "",
@@ -1060,6 +1135,7 @@ export default async function handler(req: any, res: any) {
           payment_id: paymentRow.id,
           customer_id: customer.id,
           booking_source: bookingSource,
+          booking_duration_hours: String(durationHours),
           tax_exempt: String(taxExempt),
           tax_exempt_status: taxExemptStatus || "",
           offer_code: appliedOffer?.code || "",
@@ -1073,9 +1149,9 @@ export default async function handler(req: any, res: any) {
             currency: "usd",
             product_data: {
               name: taxExempt ? "Tex Axes Booking (Tax Exempt)" : "Tex Axes Booking",
-              description: `${date} ${time.slice(0, 5)} · ${throwers} thrower(s)${
-                appliedOffer ? ` · Offer ${appliedOffer.code}` : ""
-              }`,
+              description: `${date} ${time.slice(0, 5)} · ${throwers} thrower(s) · ${durationHours} hour${
+                durationHours === 1 ? "" : "s"
+              }${appliedOffer ? ` · Offer ${appliedOffer.code}` : ""}`,
             },
             unit_amount: Math.round(pricing.total_amount * 100),
           },
@@ -1120,6 +1196,7 @@ export default async function handler(req: any, res: any) {
       customerName: `${customer.first_name} ${customer.last_name}`.trim(),
       date,
       time,
+      durationHours,
       partySize: throwers,
       totalAmount: pricing.total_amount,
       checkoutUrl: session.url,
@@ -1144,6 +1221,7 @@ export default async function handler(req: any, res: any) {
       customerPhone: customer.phone,
       date,
       time,
+      durationHours,
       partySize: throwers,
       totalAmount: pricing.total_amount,
       bookingSource,
@@ -1162,6 +1240,7 @@ export default async function handler(req: any, res: any) {
       booking_id: booking.id,
       customer_id: customer.id,
       time_block_id: timeBlock.id,
+      duration_hours: durationHours,
       party_size: throwers,
       bays_allocated: baysAllocated,
       allocation_mode: allocationMode,
@@ -1202,6 +1281,7 @@ export default async function handler(req: any, res: any) {
         preferred_bays_required: preferred,
         minimum_bays_required: minimum,
       },
+      duration_hours: durationHours,
       tax_exempt: taxExempt,
       tax_exempt_reason: taxExempt
         ? normalizeOptionalText(payload.tax_exempt_reason)
@@ -1225,8 +1305,10 @@ export default async function handler(req: any, res: any) {
         internal_booking_error: internalBookingEmail.error,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("POST /api/book failed", error);
-    return res.status(500).json({ error: "Booking failed" });
+    return res.status(500).json({
+      error: error?.message || "Booking failed",
+    });
   }
 }
