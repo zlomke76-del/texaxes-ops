@@ -276,16 +276,17 @@ async function getWaiverStatusForCustomer(
   customerId: string,
   bookingDate: string
 ): Promise<"signed" | "expired" | "missing" | "guardian_required"> {
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("waivers")
-    .select("expires_at, is_minor, guardian_customer_id")
-    .eq("customer_id", customerId)
-    .order("signed_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) throw error;
+  const data = await selectFirstRow<any>(
+    supabase
+      .schema("texaxes")
+      .from("waivers")
+      .select("expires_at, is_minor, guardian_customer_id")
+      .eq("customer_id", customerId)
+      .order("signed_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(2),
+    `latest waiver for customer ${customerId}`
+  );
 
   if (!data) return "missing";
 
@@ -414,18 +415,20 @@ function computeDiscountAmount(
 }
 
 async function getActiveOfferByCode(code: string): Promise<CustomerOfferRow | null> {
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("customer_offers")
-    .select(
-      "id, code, offer_type, discount_type, discount_value, status, expires_at"
-    )
-    .eq("code", code)
-    .eq("status", "active")
-    .maybeSingle<CustomerOfferRow>();
-
-  if (error) throw error;
-  return data ?? null;
+  return selectFirstRow<CustomerOfferRow>(
+    supabase
+      .schema("texaxes")
+      .from("customer_offers")
+      .select(
+        "id, code, offer_type, discount_type, discount_value, status, expires_at"
+      )
+      .eq("code", code)
+      .eq("status", "active")
+      .order("expires_at", { ascending: true, nullsFirst: false })
+      .order("id", { ascending: true })
+      .limit(2),
+    `active offer code ${code}`
+  );
 }
 
 async function writeAuditLog(
@@ -448,6 +451,26 @@ async function writeAuditLog(
   }
 }
 
+async function selectFirstRow<T>(
+  query: PromiseLike<{ data: T[] | null; error: any }>,
+  context: string
+): Promise<T | null> {
+  const { data, error } = await query;
+  if (error) throw error;
+
+  if (!data || data.length === 0) {
+    return null;
+  }
+
+  if (data.length > 1) {
+    console.warn(`[booking-api] duplicate rows detected for ${context}`, {
+      count: data.length,
+    });
+  }
+
+  return data[0] ?? null;
+}
+
 async function findExistingCustomer(
   email?: string | null,
   phone?: string | null
@@ -456,29 +479,33 @@ async function findExistingCustomer(
   const normalizedPhone = normalizePhone(phone);
 
   if (normalizedEmail) {
-    const { data, error } = await supabase
-      .schema("texaxes")
-      .from("customers")
-      .select("id, first_name, last_name, email, phone")
-      .ilike("email", normalizedEmail)
-      .limit(1)
-      .maybeSingle<CustomerRow>();
+    const existingByEmail = await selectFirstRow<CustomerRow>(
+      supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id, first_name, last_name, email, phone")
+        .ilike("email", normalizedEmail)
+        .order("id", { ascending: true })
+        .limit(2),
+      `customer email ${normalizedEmail}`
+    );
 
-    if (error) throw error;
-    if (data) return data;
+    if (existingByEmail) return existingByEmail;
   }
 
   if (normalizedPhone) {
-    const { data, error } = await supabase
-      .schema("texaxes")
-      .from("customers")
-      .select("id, first_name, last_name, email, phone")
-      .eq("phone", normalizedPhone)
-      .limit(1)
-      .maybeSingle<CustomerRow>();
+    const existingByPhone = await selectFirstRow<CustomerRow>(
+      supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id, first_name, last_name, email, phone")
+        .eq("phone", normalizedPhone)
+        .order("id", { ascending: true })
+        .limit(2),
+      `customer phone ${normalizedPhone}`
+    );
 
-    if (error) throw error;
-    if (data) return data;
+    if (existingByPhone) return existingByPhone;
   }
 
   return null;
@@ -514,30 +541,32 @@ async function findOrCreateCustomer(
 }
 
 async function getTimeBlock(date: string, time: string): Promise<TimeBlockRow | null> {
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("time_blocks")
-    .select("id, block_date, start_time, end_time, is_open, is_bookable")
-    .eq("block_date", date)
-    .eq("start_time", time)
-    .maybeSingle<TimeBlockRow>();
-
-  if (error) throw error;
-  return data ?? null;
+  return selectFirstRow<TimeBlockRow>(
+    supabase
+      .schema("texaxes")
+      .from("time_blocks")
+      .select("id, block_date, start_time, end_time, is_open, is_bookable")
+      .eq("block_date", date)
+      .eq("start_time", time)
+      .order("id", { ascending: true })
+      .limit(2),
+    `time block ${date} ${time}`
+  );
 }
 
 async function getCapacityRowForBlock(timeBlockId: string): Promise<CapacityRow | null> {
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("v_block_capacity")
-    .select(
-      "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
-    )
-    .eq("time_block_id", timeBlockId)
-    .maybeSingle<CapacityRow>();
-
-  if (error) throw error;
-  return data ?? null;
+  return selectFirstRow<CapacityRow>(
+    supabase
+      .schema("texaxes")
+      .from("v_block_capacity")
+      .select(
+        "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
+      )
+      .eq("time_block_id", timeBlockId)
+      .order("start_time", { ascending: true })
+      .limit(2),
+    `capacity row for block ${timeBlockId}`
+  );
 }
 
 async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
