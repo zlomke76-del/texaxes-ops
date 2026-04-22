@@ -597,6 +597,26 @@ async function writeAuditLog(
   }
 }
 
+async function selectFirstRow<T>(
+  query: PromiseLike<{ data: T[] | null; error: any }>,
+  context: string
+): Promise<T | null> {
+  const { data, error } = await query;
+  if (error) throw error;
+
+  if (!data || data.length === 0) {
+    return null;
+  }
+
+  if (data.length > 1) {
+    console.warn(`[booking-server] duplicate rows detected for ${context}`, {
+      count: data.length,
+    });
+  }
+
+  return data[0] ?? null;
+}
+
 async function findExistingCustomer(
   email?: string | null,
   phone?: string | null
@@ -604,31 +624,35 @@ async function findExistingCustomer(
   if (email && email.trim()) {
     const normalizedEmail = email.trim().toLowerCase();
 
-    const { data, error } = await supabase
-      .schema("texaxes")
-      .from("customers")
-      .select("id, first_name, last_name, email, phone")
-      .ilike("email", normalizedEmail)
-      .limit(1)
-      .maybeSingle<CustomerRow>();
+    const existingByEmail = await selectFirstRow<CustomerRow>(
+      supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id, first_name, last_name, email, phone")
+        .ilike("email", normalizedEmail)
+        .order("id", { ascending: true })
+        .limit(2),
+      `customer email ${normalizedEmail}`
+    );
 
-    if (error) throw error;
-    if (data) return data;
+    if (existingByEmail) return existingByEmail;
   }
 
   if (phone && phone.trim()) {
     const normalizedPhone = phone.trim();
 
-    const { data, error } = await supabase
-      .schema("texaxes")
-      .from("customers")
-      .select("id, first_name, last_name, email, phone")
-      .eq("phone", normalizedPhone)
-      .limit(1)
-      .maybeSingle<CustomerRow>();
+    const existingByPhone = await selectFirstRow<CustomerRow>(
+      supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id, first_name, last_name, email, phone")
+        .eq("phone", normalizedPhone)
+        .order("id", { ascending: true })
+        .limit(2),
+      `customer phone ${normalizedPhone}`
+    );
 
-    if (error) throw error;
-    if (data) return data;
+    if (existingByPhone) return existingByPhone;
   }
 
   return null;
@@ -664,16 +688,17 @@ async function findOrCreateCustomer(customer: BaseCustomerPayload): Promise<Cust
 }
 
 async function getTimeBlock(date: string, time: string): Promise<TimeBlockRow | null> {
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("time_blocks")
-    .select("id, block_date, start_time, end_time, is_open, is_bookable")
-    .eq("block_date", date)
-    .eq("start_time", time)
-    .maybeSingle<TimeBlockRow>();
-
-  if (error) throw error;
-  return data ?? null;
+  return selectFirstRow<TimeBlockRow>(
+    supabase
+      .schema("texaxes")
+      .from("time_blocks")
+      .select("id, block_date, start_time, end_time, is_open, is_bookable")
+      .eq("block_date", date)
+      .eq("start_time", time)
+      .order("id", { ascending: true })
+      .limit(2),
+    `time block ${date} ${time}`
+  );
 }
 
 async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
@@ -691,17 +716,18 @@ async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
 }
 
 async function getCapacityRowForBlock(timeBlockId: string): Promise<CapacityRow | null> {
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("v_block_capacity_halfhour")
-    .select(
-      "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
-    )
-    .eq("time_block_id", timeBlockId)
-    .maybeSingle<CapacityRow>();
-
-  if (error) throw error;
-  return data ?? null;
+  return selectFirstRow<CapacityRow>(
+    supabase
+      .schema("texaxes")
+      .from("v_block_capacity_halfhour")
+      .select(
+        "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
+      )
+      .eq("time_block_id", timeBlockId)
+      .order("start_time", { ascending: true })
+      .limit(2),
+    `capacity row for block ${timeBlockId}`
+  );
 }
 
 async function getAddonCatalogMap(): Promise<Map<string, string>> {
@@ -723,16 +749,18 @@ async function getAddonCatalogMap(): Promise<Map<string, string>> {
 async function getLatestPaymentByBookingId(
   bookingId: string
 ): Promise<{ id: string; status: string | null; amount: number | null } | null> {
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("payments")
-    .select("id, status, amount")
-    .eq("booking_id", bookingId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const data = await selectFirstRow<{ id: string; status: string | null; amount: number | null }>(
+    supabase
+      .schema("texaxes")
+      .from("payments")
+      .select("id, status, amount")
+      .eq("booking_id", bookingId)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(2),
+    `latest payment for booking ${bookingId}`
+  );
 
-  if (error) throw error;
   return data ?? null;
 }
 
@@ -748,16 +776,19 @@ async function getWaiverSummaryForBooking(
 }> {
   const required = Math.max(1, Number(partySize || 1));
 
-  const { data, error } = await supabase
-    .schema("texaxes")
-    .from("waivers")
-    .select("expires_at, is_minor, guardian_customer_id")
-    .eq("customer_id", customerId)
-    .order("signed_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const data = await selectFirstRow<any>(
+    supabase
+      .schema("texaxes")
+      .from("waivers")
+      .select("expires_at, is_minor, guardian_customer_id")
+      .eq("customer_id", customerId)
+      .order("signed_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(2),
+    `latest waiver for customer ${customerId}`
+  );
 
-  if (error || !data) {
+  if (!data) {
     return {
       waiver_status: "missing",
       waiver_required: required,
@@ -2288,6 +2319,8 @@ app.post("/api/admin/create-tab", async (req, res) => {
         .select("*")
         .eq("booking_id", payload.booking_id)
         .eq("status", "open")
+        .order("opened_at", { ascending: false })
+        .order("id", { ascending: false })
         .limit(1)
         .maybeSingle();
 
@@ -3358,4 +3391,3 @@ for (const booking of bookings) {
 });
 
 export default app;
-
