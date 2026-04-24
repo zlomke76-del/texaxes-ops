@@ -33,8 +33,14 @@ app.use((req, res, next) => {
     res.setHeader("Vary", "Origin");
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, stripe-signature");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, stripe-signature",
+  );
   res.setHeader("Access-Control-Max-Age", "86400");
 
   if (req.method === "OPTIONS") {
@@ -133,11 +139,31 @@ type AdminCreateBookingPayload = {
 
 type WaiverSignPayload = {
   booking_id?: string | null;
+  customer_id?: string | null;
   customer: BaseCustomerPayload;
   is_minor?: boolean;
   guardian?: BaseCustomerPayload | null;
   signature_data_url: string;
   signature_method?: string;
+};
+
+type WaiverSearchRow = {
+  id: string;
+  customer_id: string | null;
+  booking_id: string | null;
+  signed_at: string | null;
+  expires_at: string | null;
+  checked_in_at: string | null;
+  checked_in_by: string | null;
+  is_minor: boolean | null;
+  guardian_customer_id: string | null;
+  customer: {
+    id: string;
+    first_name: string | null;
+    last_name: string | null;
+    email: string | null;
+    phone: string | null;
+  } | null;
 };
 
 type CustomerRow = {
@@ -208,9 +234,15 @@ type TodayBookingRow = {
   booking_source: string | null;
   booking_status: string;
   payment_status: string;
-  waiver_status: "complete" | "partial" | "missing" | "guardian_required" | "expired";
+  waiver_status:
+    | "complete"
+    | "partial"
+    | "missing"
+    | "guardian_required"
+    | "expired";
   waiver_required: number;
   waiver_signed: number;
+  waiver_checked_in?: number;
   waiver_url: string;
   total_amount: number;
   tax_amount: number;
@@ -446,7 +478,7 @@ function computePricing(payload: BookingPayload): PricingResult {
     }));
 
   const addons_subtotal = roundMoney(
-    addon_lines.reduce((sum, line) => sum + line.line_total, 0)
+    addon_lines.reduce((sum, line) => sum + line.line_total, 0),
   );
 
   const subtotal = roundMoney(base_price + addons_subtotal);
@@ -464,7 +496,7 @@ function computePricing(payload: BookingPayload): PricingResult {
 }
 
 function deriveInitialWaiverStatus(
-  payload: BookingPayload
+  payload: BookingPayload,
 ): "missing" | "guardian_required" {
   const customer = payload.customer;
   if (customer?.is_minor) {
@@ -473,11 +505,18 @@ function deriveInitialWaiverStatus(
   return "missing";
 }
 
-function buildWaiverUrl(bookingId: string, customerId: string): string {
+function buildWaiverUrl(
+  bookingId?: string | null,
+  customerId?: string | null,
+): string {
   const base = WAIVER_FRONTEND_URL.replace(/\/+$/, "");
-  return `${base}/waiver?booking_id=${encodeURIComponent(
-    bookingId
-  )}&customer_id=${encodeURIComponent(customerId)}`;
+  const params = new URLSearchParams();
+
+  if (bookingId) params.set("booking_id", bookingId);
+  if (customerId) params.set("customer_id", customerId);
+
+  const query = params.toString();
+  return query ? `${base}/waiver?${query}` : `${base}/waiver`;
 }
 
 function normalizeTabType(value?: string | null): TabType {
@@ -581,7 +620,7 @@ async function writeAuditLog(
   entityType: string,
   entityId: string | null,
   metadata: Record<string, unknown>,
-  actorType: "system" | "admin" | "customer" | "webhook" = "system"
+  actorType: "system" | "admin" | "customer" | "webhook" = "system",
 ): Promise<void> {
   try {
     await supabase.schema("texaxes").from("audit_log").insert({
@@ -599,7 +638,7 @@ async function writeAuditLog(
 
 async function selectFirstRow<T>(
   query: PromiseLike<{ data: T[] | null; error: any }>,
-  context: string
+  context: string,
 ): Promise<T | null> {
   const { data, error } = await query;
   if (error) throw error;
@@ -619,7 +658,7 @@ async function selectFirstRow<T>(
 
 async function findExistingCustomer(
   email?: string | null,
-  phone?: string | null
+  phone?: string | null,
 ): Promise<CustomerRow | null> {
   if (email && email.trim()) {
     const normalizedEmail = email.trim().toLowerCase();
@@ -632,7 +671,7 @@ async function findExistingCustomer(
         .ilike("email", normalizedEmail)
         .order("id", { ascending: true })
         .limit(2),
-      `customer email ${normalizedEmail}`
+      `customer email ${normalizedEmail}`,
     );
 
     if (existingByEmail) return existingByEmail;
@@ -649,7 +688,7 @@ async function findExistingCustomer(
         .eq("phone", normalizedPhone)
         .order("id", { ascending: true })
         .limit(2),
-      `customer phone ${normalizedPhone}`
+      `customer phone ${normalizedPhone}`,
     );
 
     if (existingByPhone) return existingByPhone;
@@ -658,7 +697,9 @@ async function findExistingCustomer(
   return null;
 }
 
-async function findOrCreateCustomer(customer: BaseCustomerPayload): Promise<CustomerRow> {
+async function findOrCreateCustomer(
+  customer: BaseCustomerPayload,
+): Promise<CustomerRow> {
   const existing = await findExistingCustomer(customer.email, customer.phone);
   if (existing) {
     return existing;
@@ -687,7 +728,10 @@ async function findOrCreateCustomer(customer: BaseCustomerPayload): Promise<Cust
   return data;
 }
 
-async function getTimeBlock(date: string, time: string): Promise<TimeBlockRow | null> {
+async function getTimeBlock(
+  date: string,
+  time: string,
+): Promise<TimeBlockRow | null> {
   return selectFirstRow<TimeBlockRow>(
     supabase
       .schema("texaxes")
@@ -697,7 +741,7 @@ async function getTimeBlock(date: string, time: string): Promise<TimeBlockRow | 
       .eq("start_time", time)
       .order("id", { ascending: true })
       .limit(2),
-    `time block ${date} ${time}`
+    `time block ${date} ${time}`,
   );
 }
 
@@ -706,7 +750,7 @@ async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
     .schema("texaxes")
     .from("v_block_capacity_halfhour")
     .select(
-      "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
+      "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open",
     )
     .eq("block_date", date)
     .order("start_time", { ascending: true });
@@ -715,18 +759,20 @@ async function getCapacityRowsForDate(date: string): Promise<CapacityRow[]> {
   return (data || []) as CapacityRow[];
 }
 
-async function getCapacityRowForBlock(timeBlockId: string): Promise<CapacityRow | null> {
+async function getCapacityRowForBlock(
+  timeBlockId: string,
+): Promise<CapacityRow | null> {
   return selectFirstRow<CapacityRow>(
     supabase
       .schema("texaxes")
       .from("v_block_capacity_halfhour")
       .select(
-        "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open"
+        "time_block_id, block_date, start_time, end_time, is_open, is_bookable, total_bays, bays_used, bays_open",
       )
       .eq("time_block_id", timeBlockId)
       .order("start_time", { ascending: true })
       .limit(2),
-    `capacity row for block ${timeBlockId}`
+    `capacity row for block ${timeBlockId}`,
   );
 }
 
@@ -746,10 +792,16 @@ async function getAddonCatalogMap(): Promise<Map<string, string>> {
   return map;
 }
 
-async function getLatestPaymentByBookingId(
-  bookingId: string
-): Promise<{ id: string; status: string | null; amount: number | null } | null> {
-  const data = await selectFirstRow<{ id: string; status: string | null; amount: number | null }>(
+async function getLatestPaymentByBookingId(bookingId: string): Promise<{
+  id: string;
+  status: string | null;
+  amount: number | null;
+} | null> {
+  const data = await selectFirstRow<{
+    id: string;
+    status: string | null;
+    amount: number | null;
+  }>(
     supabase
       .schema("texaxes")
       .from("payments")
@@ -758,68 +810,161 @@ async function getLatestPaymentByBookingId(
       .order("created_at", { ascending: false })
       .order("id", { ascending: false })
       .limit(2),
-    `latest payment for booking ${bookingId}`
+    `latest payment for booking ${bookingId}`,
   );
 
   return data ?? null;
 }
 
 async function getWaiverSummaryForBooking(
-  _bookingId: string,
+  bookingId: string,
   customerId: string,
   bookingDate: string,
-  partySize: number
+  partySize: number,
 ): Promise<{
-  waiver_status: "complete" | "partial" | "missing" | "guardian_required" | "expired";
+  waiver_status:
+    | "complete"
+    | "partial"
+    | "missing"
+    | "guardian_required"
+    | "expired";
   waiver_required: number;
   waiver_signed: number;
+  waiver_checked_in: number;
 }> {
   const required = Math.max(1, Number(partySize || 1));
 
-  const data = await selectFirstRow<any>(
-    supabase
-      .schema("texaxes")
-      .from("waivers")
-      .select("expires_at, is_minor, guardian_customer_id")
-      .eq("customer_id", customerId)
-      .order("signed_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(2),
-    `latest waiver for customer ${customerId}`
-  );
+  const { data, error } = await supabase
+    .schema("texaxes")
+    .from("waivers")
+    .select(
+      "id, booking_id, customer_id, expires_at, is_minor, guardian_customer_id, checked_in_at, signed_at",
+    )
+    .or(`booking_id.eq.${bookingId},customer_id.eq.${customerId}`)
+    .order("signed_at", { ascending: false });
 
-  if (!data) {
+  if (error) throw error;
+
+  const waivers = data || [];
+
+  if (!waivers.length) {
     return {
       waiver_status: "missing",
       waiver_required: required,
       waiver_signed: 0,
+      waiver_checked_in: 0,
     };
   }
 
   const booking = new Date(`${bookingDate}T00:00:00`);
-  const expiry = new Date(data.expires_at);
+  let validSigned = 0;
+  let expired = 0;
+  let guardianRequired = 0;
+  let checkedIn = 0;
 
-  if (expiry < booking) {
+  for (const waiver of waivers) {
+    const expiry = waiver.expires_at ? new Date(waiver.expires_at) : null;
+    const isExpired = !expiry || expiry < booking;
+    const needsGuardian =
+      Boolean(waiver.is_minor) && !waiver.guardian_customer_id;
+
+    if (needsGuardian) {
+      guardianRequired += 1;
+      continue;
+    }
+
+    if (isExpired) {
+      expired += 1;
+      continue;
+    }
+
+    validSigned += 1;
+    if (waiver.checked_in_at) checkedIn += 1;
+  }
+
+  if (guardianRequired > 0) {
+    return {
+      waiver_status: "guardian_required",
+      waiver_required: required,
+      waiver_signed: validSigned,
+      waiver_checked_in: checkedIn,
+    };
+  }
+
+  if (validSigned >= required) {
+    return {
+      waiver_status: "complete",
+      waiver_required: required,
+      waiver_signed: validSigned,
+      waiver_checked_in: checkedIn,
+    };
+  }
+
+  if (validSigned > 0) {
+    return {
+      waiver_status: "partial",
+      waiver_required: required,
+      waiver_signed: validSigned,
+      waiver_checked_in: checkedIn,
+    };
+  }
+
+  if (expired > 0) {
     return {
       waiver_status: "expired",
       waiver_required: required,
       waiver_signed: 0,
-    };
-  }
-
-  if (data.is_minor && !data.guardian_customer_id) {
-    return {
-      waiver_status: "guardian_required",
-      waiver_required: required,
-      waiver_signed: 0,
+      waiver_checked_in: checkedIn,
     };
   }
 
   return {
-    waiver_status: required > 1 ? "partial" : "complete",
+    waiver_status: "missing",
     waiver_required: required,
-    waiver_signed: 1,
+    waiver_signed: 0,
+    waiver_checked_in: checkedIn,
   };
+}
+
+async function refreshBookingWaiverStatus(bookingId: string): Promise<void> {
+  const { data: booking, error: bookingError } = await supabase
+    .schema("texaxes")
+    .from("bookings")
+    .select("id, customer_id, party_size, start_block_id")
+    .eq("id", bookingId)
+    .maybeSingle();
+
+  if (bookingError) throw bookingError;
+  if (!booking) return;
+
+  let bookingDate = getTodayLocalDate();
+
+  if (booking.start_block_id) {
+    const { data: block, error: blockError } = await supabase
+      .schema("texaxes")
+      .from("time_blocks")
+      .select("block_date")
+      .eq("id", booking.start_block_id)
+      .maybeSingle();
+
+    if (blockError) throw blockError;
+    if (block?.block_date) bookingDate = block.block_date;
+  }
+
+  const summary = await getWaiverSummaryForBooking(
+    booking.id,
+    booking.customer_id,
+    bookingDate,
+    Number(booking.party_size || 1),
+  );
+
+  const { error: updateError } = await supabase
+    .schema("texaxes")
+    .from("bookings")
+    .update({ waiver_status: summary.waiver_status })
+    .eq("id", booking.id);
+
+  if (updateError) throw updateError;
 }
 
 async function recalculateTabTotals(tabId: string): Promise<TabRow> {
@@ -840,18 +985,24 @@ async function recalculateTabTotals(tabId: string): Promise<TabRow> {
   if (paymentsError) throw paymentsError;
 
   const subtotal = roundMoney(
-    (items || []).reduce((sum, row: any) => sum + Number(row.line_subtotal || 0), 0)
+    (items || []).reduce(
+      (sum, row: any) => sum + Number(row.line_subtotal || 0),
+      0,
+    ),
   );
   const tax_total = roundMoney(
-    (items || []).reduce((sum, row: any) => sum + Number(row.line_tax || 0), 0)
+    (items || []).reduce((sum, row: any) => sum + Number(row.line_tax || 0), 0),
   );
   const grand_total = roundMoney(
-    (items || []).reduce((sum, row: any) => sum + Number(row.line_total || 0), 0)
+    (items || []).reduce(
+      (sum, row: any) => sum + Number(row.line_total || 0),
+      0,
+    ),
   );
   const amount_paid = roundMoney(
     (payments || [])
       .filter((row: any) => row.status === "completed")
-      .reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0)
+      .reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0),
   );
   const balance_due = roundMoney(Math.max(grand_total - amount_paid, 0));
 
@@ -888,7 +1039,8 @@ async function loadTabById(tabId: string) {
   const { data: tab, error: tabError } = await supabase
     .schema("texaxes")
     .from("tabs")
-    .select(`
+    .select(
+      `
       id,
       booking_id,
       customer_id,
@@ -923,7 +1075,8 @@ async function loadTabById(tabId: string) {
           customer_notes,
           internal_notes
         )
-    `)
+    `,
+    )
     .eq("id", tabId)
     .single();
 
@@ -983,7 +1136,7 @@ async function markBookingPaid(
   paymentId: string | null,
   paymentIntentId: string,
   checkoutSessionId: string | null,
-  amountReceivedCents: number
+  amountReceivedCents: number,
 ): Promise<void> {
   const amountReceived = amountReceivedCents / 100;
   const paidAtIso = new Date().toISOString();
@@ -1093,7 +1246,7 @@ async function markBookingPaid(
       amount_received_cents: amountReceivedCents,
       offer_code: paidBooking?.offer_code || null,
     },
-    "webhook"
+    "webhook",
   );
 }
 
@@ -1101,7 +1254,7 @@ async function markLeagueRegistrationPaid(
   registrationId: string,
   paymentIntentId: string,
   checkoutSessionId: string | null,
-  amountReceivedCents: number
+  amountReceivedCents: number,
 ): Promise<void> {
   const amountReceived = amountReceivedCents / 100;
 
@@ -1133,7 +1286,7 @@ async function markLeagueRegistrationPaid(
       stripe_checkout_session_id: checkoutSessionId,
       amount_received_cents: amountReceivedCents,
     },
-    "webhook"
+    "webhook",
   );
 }
 
@@ -1142,7 +1295,7 @@ async function markPaymentFailed(
   paymentId: string | null,
   paymentIntentId: string,
   checkoutSessionId: string | null,
-  lastPaymentError: string | null
+  lastPaymentError: string | null,
 ): Promise<void> {
   if (paymentId) {
     const { error: paymentError } = await supabase
@@ -1173,7 +1326,7 @@ async function markPaymentFailed(
         stripe_checkout_session_id: checkoutSessionId,
         error: lastPaymentError,
       },
-      "webhook"
+      "webhook",
     );
   }
 }
@@ -1182,7 +1335,7 @@ async function markLeagueRegistrationFailed(
   registrationId: string | null,
   paymentIntentId: string,
   checkoutSessionId: string | null,
-  lastPaymentError: string | null
+  lastPaymentError: string | null,
 ): Promise<void> {
   if (!registrationId) return;
 
@@ -1211,14 +1364,14 @@ async function markLeagueRegistrationFailed(
       stripe_checkout_session_id: checkoutSessionId,
       error: lastPaymentError,
     },
-    "webhook"
+    "webhook",
   );
 }
 
 async function expireUnpaidBooking(
   bookingId: string,
   paymentId: string | null,
-  checkoutSessionId: string
+  checkoutSessionId: string,
 ): Promise<void> {
   const { error: bookingError } = await supabase
     .schema("texaxes")
@@ -1258,13 +1411,13 @@ async function expireUnpaidBooking(
       payment_id: paymentId,
       stripe_checkout_session_id: checkoutSessionId,
     },
-    "webhook"
+    "webhook",
   );
 }
 
 async function expireUnpaidLeagueRegistration(
   registrationId: string,
-  checkoutSessionId: string
+  checkoutSessionId: string,
 ): Promise<void> {
   const { error } = await supabase
     .schema("texaxes")
@@ -1289,7 +1442,7 @@ async function expireUnpaidLeagueRegistration(
       league_registration_id: registrationId,
       stripe_checkout_session_id: checkoutSessionId,
     },
-    "webhook"
+    "webhook",
   );
 }
 
@@ -1320,7 +1473,11 @@ app.post(
 
       let event: Stripe.Event;
       try {
-        event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
+        event = stripe.webhooks.constructEvent(
+          rawBody,
+          signature,
+          webhookSecret,
+        );
       } catch (err: any) {
         console.error("Stripe webhook signature verification failed", err);
         return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -1331,7 +1488,8 @@ app.post(
           const session = event.data.object as Stripe.Checkout.Session;
 
           const bookingId = session.metadata?.booking_id || null;
-          const leagueRegistrationId = session.metadata?.league_registration_id || null;
+          const leagueRegistrationId =
+            session.metadata?.league_registration_id || null;
           const paymentId = session.metadata?.payment_id || null;
 
           const paymentIntentId =
@@ -1349,7 +1507,7 @@ app.post(
               paymentId,
               paymentIntentId,
               session.id,
-              session.amount_total || 0
+              session.amount_total || 0,
             );
           }
 
@@ -1358,12 +1516,14 @@ app.post(
               leagueRegistrationId,
               paymentIntentId,
               session.id,
-              session.amount_total || 0
+              session.amount_total || 0,
             );
           }
 
           if (!bookingId && !leagueRegistrationId) {
-            return res.status(400).send("Missing booking or league registration metadata");
+            return res
+              .status(400)
+              .send("Missing booking or league registration metadata");
           }
 
           break;
@@ -1373,7 +1533,8 @@ app.post(
           const paymentIntent = event.data.object as Stripe.PaymentIntent;
 
           const bookingId = paymentIntent.metadata?.booking_id || null;
-          const leagueRegistrationId = paymentIntent.metadata?.league_registration_id || null;
+          const leagueRegistrationId =
+            paymentIntent.metadata?.league_registration_id || null;
           const paymentId = paymentIntent.metadata?.payment_id || null;
 
           if (bookingId) {
@@ -1382,7 +1543,7 @@ app.post(
               paymentId,
               paymentIntent.id,
               null,
-              paymentIntent.amount_received || paymentIntent.amount || 0
+              paymentIntent.amount_received || paymentIntent.amount || 0,
             );
           }
 
@@ -1391,7 +1552,7 @@ app.post(
               leagueRegistrationId,
               paymentIntent.id,
               null,
-              paymentIntent.amount_received || paymentIntent.amount || 0
+              paymentIntent.amount_received || paymentIntent.amount || 0,
             );
           }
 
@@ -1402,16 +1563,23 @@ app.post(
           const paymentIntent = event.data.object as Stripe.PaymentIntent;
 
           const bookingId = paymentIntent.metadata?.booking_id || null;
-          const leagueRegistrationId = paymentIntent.metadata?.league_registration_id || null;
+          const leagueRegistrationId =
+            paymentIntent.metadata?.league_registration_id || null;
           const paymentId = paymentIntent.metadata?.payment_id || null;
           const message = paymentIntent.last_payment_error?.message || null;
 
-          await markPaymentFailed(bookingId, paymentId, paymentIntent.id, null, message);
+          await markPaymentFailed(
+            bookingId,
+            paymentId,
+            paymentIntent.id,
+            null,
+            message,
+          );
           await markLeagueRegistrationFailed(
             leagueRegistrationId,
             paymentIntent.id,
             null,
-            message
+            message,
           );
           break;
         }
@@ -1420,7 +1588,8 @@ app.post(
           const session = event.data.object as Stripe.Checkout.Session;
 
           const bookingId = session.metadata?.booking_id || null;
-          const leagueRegistrationId = session.metadata?.league_registration_id || null;
+          const leagueRegistrationId =
+            session.metadata?.league_registration_id || null;
           const paymentId = session.metadata?.payment_id || null;
 
           if (bookingId) {
@@ -1428,7 +1597,10 @@ app.post(
           }
 
           if (leagueRegistrationId) {
-            await expireUnpaidLeagueRegistration(leagueRegistrationId, session.id);
+            await expireUnpaidLeagueRegistration(
+              leagueRegistrationId,
+              session.id,
+            );
           }
 
           break;
@@ -1443,7 +1615,7 @@ app.post(
       console.error("Stripe webhook failed", error);
       return res.status(500).send("Webhook handler failed");
     }
-  }
+  },
 );
 
 // IMPORTANT: JSON parsing comes after Stripe webhook route
@@ -1564,14 +1736,12 @@ app.post("/api/waivers/sign", async (req, res) => {
       return res.status(400).json({ error: "Signature required" });
     }
 
-    let bookingRecord:
-      | {
-          id: string;
-          customer_id: string;
-          party_size: number | null;
-          start_block_id: string | null;
-        }
-      | null = null;
+    let bookingRecord: {
+      id: string;
+      customer_id: string;
+      party_size: number | null;
+      start_block_id: string | null;
+    } | null = null;
 
     let bookingDate: string | null = null;
     let bookingPartySize = 1;
@@ -1623,12 +1793,13 @@ app.post("/api/waivers/sign", async (req, res) => {
     let customerRow: CustomerRow;
 
     if (customer_id) {
-      const { data: existingCustomer, error: customerLookupError } = await supabase
-        .schema("texaxes")
-        .from("customers")
-        .select("id, first_name, last_name, email, phone")
-        .eq("id", customer_id)
-        .maybeSingle<CustomerRow>();
+      const { data: existingCustomer, error: customerLookupError } =
+        await supabase
+          .schema("texaxes")
+          .from("customers")
+          .select("id, first_name, last_name, email, phone")
+          .eq("id", customer_id)
+          .maybeSingle<CustomerRow>();
 
       if (customerLookupError) {
         throw customerLookupError;
@@ -1640,12 +1811,13 @@ app.post("/api/waivers/sign", async (req, res) => {
 
       customerRow = existingCustomer;
     } else if (bookingRecord?.customer_id) {
-      const { data: bookingCustomer, error: bookingCustomerError } = await supabase
-        .schema("texaxes")
-        .from("customers")
-        .select("id, first_name, last_name, email, phone")
-        .eq("id", bookingRecord.customer_id)
-        .maybeSingle<CustomerRow>();
+      const { data: bookingCustomer, error: bookingCustomerError } =
+        await supabase
+          .schema("texaxes")
+          .from("customers")
+          .select("id, first_name, last_name, email, phone")
+          .eq("id", bookingRecord.customer_id)
+          .maybeSingle<CustomerRow>();
 
       if (bookingCustomerError) {
         throw bookingCustomerError;
@@ -1724,12 +1896,14 @@ app.post("/api/waivers/sign", async (req, res) => {
           booking_id,
           customerRow.id,
           bookingDate,
-          bookingPartySize
+          bookingPartySize,
         );
         nextWaiverStatus = summary.waiver_status;
       } else {
         nextWaiverStatus =
-          Boolean(is_minor) && !guardianCustomerId ? "guardian_required" : "complete";
+          Boolean(is_minor) && !guardianCustomerId
+            ? "guardian_required"
+            : "complete";
       }
 
       const { error: bookingUpdateError } = await supabase
@@ -1755,7 +1929,7 @@ app.post("/api/waivers/sign", async (req, res) => {
         booking_id: booking_id || null,
         is_minor: Boolean(is_minor),
       },
-      "customer"
+      "customer",
     );
 
     return res.json({
@@ -1770,12 +1944,196 @@ app.post("/api/waivers/sign", async (req, res) => {
     return res.status(500).json({ error: "Waiver signing failed" });
   }
 });
+
+// ======================================================
+// ADMIN WAIVER SEARCH + CHECK-IN
+// ======================================================
+app.get("/api/admin/waivers/search", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const bookingId = req.query.booking_id
+      ? String(req.query.booking_id)
+      : null;
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
+
+    if (!q && !bookingId) {
+      return res.json({ success: true, waivers: [] });
+    }
+
+    let customerIds: string[] = [];
+
+    if (q) {
+      const safeQ = q.replace(/[%_]/g, "");
+      const { data: customers, error: customerError } = await supabase
+        .schema("texaxes")
+        .from("customers")
+        .select("id")
+        .or(
+          `first_name.ilike.%${safeQ}%,last_name.ilike.%${safeQ}%,email.ilike.%${safeQ}%,phone.ilike.%${safeQ}%`,
+        )
+        .limit(100);
+
+      if (customerError) throw customerError;
+      customerIds = (customers || []).map((row) => row.id).filter(Boolean);
+    }
+
+    let query = supabase
+      .schema("texaxes")
+      .from("waivers")
+      .select(
+        "id, customer_id, booking_id, signed_at, expires_at, checked_in_at, checked_in_by, is_minor, guardian_customer_id",
+      )
+      .order("signed_at", { ascending: false })
+      .limit(limit);
+
+    if (bookingId && customerIds.length > 0) {
+      query = query.or(
+        `booking_id.eq.${bookingId},customer_id.in.(${customerIds.join(",")})`,
+      );
+    } else if (bookingId) {
+      query = query.eq("booking_id", bookingId);
+    } else if (customerIds.length > 0) {
+      query = query.in("customer_id", customerIds);
+    } else {
+      return res.json({ success: true, waivers: [] });
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const rows = data || [];
+    const waiverCustomerIds = [
+      ...new Set(rows.map((row) => row.customer_id).filter(Boolean)),
+    ];
+
+    const customerMap = new Map<string, CustomerRow>();
+
+    if (waiverCustomerIds.length > 0) {
+      const { data: waiverCustomers, error: waiverCustomerError } =
+        await supabase
+          .schema("texaxes")
+          .from("customers")
+          .select("id, first_name, last_name, email, phone")
+          .in("id", waiverCustomerIds);
+
+      if (waiverCustomerError) throw waiverCustomerError;
+
+      for (const customer of waiverCustomers || []) {
+        customerMap.set(customer.id, customer as CustomerRow);
+      }
+    }
+
+    const waivers = rows.map((waiver) => {
+      const customer = waiver.customer_id
+        ? customerMap.get(waiver.customer_id)
+        : null;
+
+      return {
+        id: waiver.id,
+        customer_id: waiver.customer_id,
+        booking_id: waiver.booking_id,
+        signed_at: waiver.signed_at,
+        expires_at: waiver.expires_at,
+        checked_in_at: waiver.checked_in_at,
+        checked_in_by: waiver.checked_in_by,
+        is_minor: Boolean(waiver.is_minor),
+        guardian_customer_id: waiver.guardian_customer_id,
+        customer_name: customer
+          ? `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
+            "Unknown Customer"
+          : "Unknown Customer",
+        email: customer?.email || null,
+        phone: customer?.phone || null,
+        status: waiver.checked_in_at ? "checked_in" : "signed",
+      };
+    });
+
+    return res.json({ success: true, waivers });
+  } catch (error) {
+    console.error("GET /api/admin/waivers/search failed", error);
+    return res.status(500).json({ error: "Failed to search waivers" });
+  }
+});
+
+app.post("/api/admin/waivers/check-in", async (req, res) => {
+  try {
+    const waiverId = String(req.body?.waiver_id || "").trim();
+    const bookingId = req.body?.booking_id
+      ? String(req.body.booking_id).trim()
+      : null;
+    const checkedInBy = req.body?.checked_in_by
+      ? String(req.body.checked_in_by).trim()
+      : null;
+
+    if (!waiverId) {
+      return res.status(400).json({ error: "waiver_id required" });
+    }
+
+    if (bookingId) {
+      const { data: booking, error: bookingError } = await supabase
+        .schema("texaxes")
+        .from("bookings")
+        .select("id")
+        .eq("id", bookingId)
+        .maybeSingle();
+
+      if (bookingError) throw bookingError;
+      if (!booking) return res.status(404).json({ error: "Booking not found" });
+    }
+
+    const updatePayload: Record<string, unknown> = {
+      checked_in_at: new Date().toISOString(),
+      checked_in_by: checkedInBy,
+    };
+
+    if (bookingId) {
+      updatePayload.booking_id = bookingId;
+    }
+
+    const { data: waiver, error } = await supabase
+      .schema("texaxes")
+      .from("waivers")
+      .update(updatePayload)
+      .eq("id", waiverId)
+      .select("id, customer_id, booking_id, checked_in_at, checked_in_by")
+      .single();
+
+    if (error || !waiver) {
+      throw error || new Error("Waiver check-in failed");
+    }
+
+    const affectedBookingId = bookingId || waiver.booking_id || null;
+    if (affectedBookingId) {
+      await refreshBookingWaiverStatus(affectedBookingId);
+    }
+
+    await writeAuditLog(
+      "waiver_checked_in",
+      "waiver",
+      waiver.id,
+      {
+        customer_id: waiver.customer_id,
+        booking_id: affectedBookingId,
+        checked_in_by: checkedInBy,
+      },
+      "staff",
+    );
+
+    return res.json({ success: true, waiver });
+  } catch (error) {
+    console.error("POST /api/admin/waivers/check-in failed", error);
+    return res.status(500).json({ error: "Failed to check in waiver" });
+  }
+});
+
 // ======================================================
 // ADMIN DATE BOARD
 // ======================================================
 app.get("/api/admin/bookings-today", async (req, res) => {
   try {
-    const queryDate = req.query.date ? String(req.query.date) : getTodayLocalDate();
+    const queryDate = req.query.date
+      ? String(req.query.date)
+      : getTodayLocalDate();
     const date = normalizeDate(queryDate);
 
     const { data: blockRows, error: blockError } = await supabase
@@ -1820,7 +2178,7 @@ app.get("/api/admin/bookings-today", async (req, res) => {
       .schema("texaxes")
       .from("bookings")
       .select(
-        "id, customer_id, booking_source, booking_type, status, start_block_id, party_size, bays_allocated, allocation_mode, total_amount, tax_amount, customer_notes, internal_notes, created_at"
+        "id, customer_id, booking_source, booking_type, status, start_block_id, party_size, bays_allocated, allocation_mode, total_amount, tax_amount, customer_notes, internal_notes, created_at",
       )
       .in("start_block_id", blockIds)
       .order("created_at", { ascending: true });
@@ -1849,7 +2207,9 @@ app.get("/api/admin/bookings-today", async (req, res) => {
     }
 
     const bookingIds = bookings.map((row) => row.id);
-    const customerIds = [...new Set(bookings.map((row) => row.customer_id).filter(Boolean))];
+    const customerIds = [
+      ...new Set(bookings.map((row) => row.customer_id).filter(Boolean)),
+    ];
 
     const [
       { data: customerRows, error: customerError },
@@ -1875,7 +2235,9 @@ app.get("/api/admin/bookings-today", async (req, res) => {
     if (customerError) throw customerError;
     if (paymentError) throw paymentError;
 
-    const customerMap = new Map((customerRows || []).map((row) => [row.id, row]));
+    const customerMap = new Map(
+      (customerRows || []).map((row) => [row.id, row]),
+    );
 
     const latestPaymentMap = new Map<
       string,
@@ -1903,7 +2265,7 @@ app.get("/api/admin/bookings-today", async (req, res) => {
           booking.id,
           booking.customer_id,
           date,
-          Number(booking.party_size || 1)
+          Number(booking.party_size || 1),
         );
 
         return {
@@ -1925,15 +2287,18 @@ app.get("/api/admin/bookings-today", async (req, res) => {
           waiver_status: waiverSummary.waiver_status,
           waiver_required: waiverSummary.waiver_required,
           waiver_signed: waiverSummary.waiver_signed,
+          waiver_checked_in: waiverSummary.waiver_checked_in,
           waiver_url: buildWaiverUrl(booking.id, booking.customer_id),
           total_amount: Number(booking.total_amount || 0),
           tax_amount: Number(booking.tax_amount || 0),
-          amount_paid: payment?.status === "paid" ? Number(payment.amount || 0) : 0,
+          amount_paid:
+            payment?.status === "paid" ? Number(payment.amount || 0) : 0,
           customer_notes: booking.customer_notes || null,
           internal_notes: booking.internal_notes || null,
           allocation_mode: booking.allocation_mode || null,
           bays_allocated:
-            booking.bays_allocated === null || booking.bays_allocated === undefined
+            booking.bays_allocated === null ||
+            booking.bays_allocated === undefined
               ? null
               : Number(booking.bays_allocated),
           created_at: booking.created_at || null,
@@ -1942,26 +2307,40 @@ app.get("/api/admin/bookings-today", async (req, res) => {
           tax_exempt_status: null,
           tax_exempt_form_collected_at: null,
         };
-      })
+      }),
     );
 
-    const sortedRows = rows.sort((a, b) => a.start_time.localeCompare(b.start_time));
+    const sortedRows = rows.sort((a, b) =>
+      a.start_time.localeCompare(b.start_time),
+    );
 
     const summary = {
       booking_count: sortedRows.length,
-      paid_count: sortedRows.filter((row) => row.payment_status === "paid").length,
-      unpaid_count: sortedRows.filter((row) => row.payment_status !== "paid").length,
-      checked_in_count: sortedRows.filter((row) => row.booking_status === "checked_in").length,
-      completed_count: sortedRows.filter((row) => row.booking_status === "completed").length,
+      paid_count: sortedRows.filter((row) => row.payment_status === "paid")
+        .length,
+      unpaid_count: sortedRows.filter((row) => row.payment_status !== "paid")
+        .length,
+      checked_in_count: sortedRows.filter(
+        (row) => row.booking_status === "checked_in",
+      ).length,
+      completed_count: sortedRows.filter(
+        (row) => row.booking_status === "completed",
+      ).length,
       expected_revenue: roundMoney(
-        sortedRows.reduce((sum, row) => sum + Number(row.total_amount || 0), 0)
+        sortedRows.reduce((sum, row) => sum + Number(row.total_amount || 0), 0),
       ),
       collected_revenue: roundMoney(
-        sortedRows.reduce((sum, row) => sum + Number(row.amount_paid || 0), 0)
+        sortedRows.reduce((sum, row) => sum + Number(row.amount_paid || 0), 0),
       ),
-      waiver_complete_count: sortedRows.filter((row) => row.waiver_status === "complete").length,
-      waiver_partial_count: sortedRows.filter((row) => row.waiver_status === "partial").length,
-      waiver_missing_count: sortedRows.filter((row) => row.waiver_status === "missing").length,
+      waiver_complete_count: sortedRows.filter(
+        (row) => row.waiver_status === "complete",
+      ).length,
+      waiver_partial_count: sortedRows.filter(
+        (row) => row.waiver_status === "partial",
+      ).length,
+      waiver_missing_count: sortedRows.filter(
+        (row) => row.waiver_status === "missing",
+      ).length,
     };
 
     return res.json({
@@ -1982,12 +2361,22 @@ app.post("/api/admin/create-booking", async (req, res) => {
   try {
     const payload = req.body as AdminCreateBookingPayload;
 
-    if (!payload?.date || !payload?.time || !payload?.throwers || !payload?.customer) {
+    if (
+      !payload?.date ||
+      !payload?.time ||
+      !payload?.throwers ||
+      !payload?.customer
+    ) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    if (!payload.customer.first_name?.trim() || !payload.customer.last_name?.trim()) {
-      return res.status(400).json({ error: "Customer first and last name are required" });
+    if (
+      !payload.customer.first_name?.trim() ||
+      !payload.customer.last_name?.trim()
+    ) {
+      return res
+        .status(400)
+        .json({ error: "Customer first and last name are required" });
     }
 
     const date = normalizeDate(payload.date);
@@ -2007,12 +2396,16 @@ app.post("/api/admin/create-booking", async (req, res) => {
 
     const timeBlock = await getTimeBlock(date, time);
     if (!timeBlock || !timeBlock.is_open || !timeBlock.is_bookable) {
-      return res.status(400).json({ error: "Invalid or unavailable time slot" });
+      return res
+        .status(400)
+        .json({ error: "Invalid or unavailable time slot" });
     }
 
     const capacity = await getCapacityRowForBlock(timeBlock.id);
     if (!capacity) {
-      return res.status(400).json({ error: "Capacity record not found for slot" });
+      return res
+        .status(400)
+        .json({ error: "Capacity record not found for slot" });
     }
 
     const { preferred, minimum } = computeBayRequirements(throwers);
@@ -2075,8 +2468,12 @@ app.post("/api/admin/create-booking", async (req, res) => {
         customer_notes: payload.customer_notes || null,
         created_by: bookingSource,
         tax_exempt: Boolean(payload.tax_exempt),
-        tax_exempt_reason: payload.tax_exempt ? payload.tax_exempt_reason || null : null,
-        tax_exempt_status: payload.tax_exempt ? payload.tax_exempt_status || "pending_form" : null,
+        tax_exempt_reason: payload.tax_exempt
+          ? payload.tax_exempt_reason || null
+          : null,
+        tax_exempt_status: payload.tax_exempt
+          ? payload.tax_exempt_status || "pending_form"
+          : null,
         tax_exempt_form_collected_at:
           payload.tax_exempt && payload.tax_exempt_status === "verified"
             ? new Date().toISOString()
@@ -2090,7 +2487,8 @@ app.post("/api/admin/create-booking", async (req, res) => {
       return res.status(500).json({ error: "Booking insert failed" });
     }
 
-    const amountForPayment = paymentStatus === "paid" ? pricing.total_amount : 0;
+    const amountForPayment =
+      paymentStatus === "paid" ? pricing.total_amount : 0;
 
     const { data: paymentRow, error: paymentInsertError } = await supabase
       .schema("texaxes")
@@ -2141,10 +2539,14 @@ app.post("/api/admin/create-booking", async (req, res) => {
         waiver_email_sent: waiverEmailResult.sent,
         waiver_email_error: waiverEmailResult.error,
         tax_exempt: Boolean(payload.tax_exempt),
-        tax_exempt_reason: payload.tax_exempt ? payload.tax_exempt_reason || null : null,
-        tax_exempt_status: payload.tax_exempt ? payload.tax_exempt_status || "pending_form" : null,
+        tax_exempt_reason: payload.tax_exempt
+          ? payload.tax_exempt_reason || null
+          : null,
+        tax_exempt_status: payload.tax_exempt
+          ? payload.tax_exempt_status || "pending_form"
+          : null,
       },
-      "admin"
+      "admin",
     );
 
     return res.json({
@@ -2226,7 +2628,9 @@ app.post("/api/admin/update-booking", async (req, res) => {
     if (payload.tax_exempt_status !== undefined) {
       bookingUpdates.tax_exempt_status = payload.tax_exempt_status;
       bookingUpdates.tax_exempt_form_collected_at =
-        payload.tax_exempt_status === "verified" ? new Date().toISOString() : null;
+        payload.tax_exempt_status === "verified"
+          ? new Date().toISOString()
+          : null;
     }
 
     if (payload.payment_status) {
@@ -2277,7 +2681,7 @@ app.post("/api/admin/update-booking", async (req, res) => {
         booking_updates: bookingUpdates,
         payment_updates: paymentUpdates,
       },
-      "admin"
+      "admin",
     );
 
     return res.json({
@@ -2309,7 +2713,9 @@ app.post("/api/admin/create-tab", async (req, res) => {
     }
 
     if (tabType === "booking" && !payload.booking_id) {
-      return res.status(400).json({ error: "booking_id is required for booking tabs" });
+      return res
+        .status(400)
+        .json({ error: "booking_id is required for booking tabs" });
     }
 
     if (payload.booking_id) {
@@ -2372,7 +2778,7 @@ app.post("/api/admin/create-tab", async (req, res) => {
         party_name: payload.party_name || null,
         party_size: partySize,
       },
-      "admin"
+      "admin",
     );
 
     return res.json({
@@ -2389,7 +2795,9 @@ app.post("/api/admin/create-tab", async (req, res) => {
     });
   } catch (error: any) {
     console.error("POST /api/admin/create-tab failed", error);
-    return res.status(500).json({ error: error?.message || "Failed to create tab" });
+    return res
+      .status(500)
+      .json({ error: error?.message || "Failed to create tab" });
   }
 });
 
@@ -2417,7 +2825,9 @@ app.get("/api/admin/get-tab", async (req, res) => {
 app.get("/api/admin/list-open-tabs", async (req, res) => {
   try {
     const rawStatus = req.query.status ? String(req.query.status) : "open";
-    const search = String(req.query.search || "").trim().toLowerCase();
+    const search = String(req.query.search || "")
+      .trim()
+      .toLowerCase();
     const tabType = req.query.tab_type ? String(req.query.tab_type) : null;
 
     const status = normalizeTabStatus(rawStatus);
@@ -2425,7 +2835,8 @@ app.get("/api/admin/list-open-tabs", async (req, res) => {
     let query = supabase
       .schema("texaxes")
       .from("tabs")
-      .select(`
+      .select(
+        `
         id,
         booking_id,
         customer_id,
@@ -2457,7 +2868,8 @@ app.get("/api/admin/list-open-tabs", async (req, res) => {
           status,
           party_size
         )
-      `)
+      `,
+      )
       .eq("status", status)
       .order("opened_at", { ascending: false });
 
@@ -2539,13 +2951,22 @@ app.get("/api/admin/list-open-tabs", async (req, res) => {
         count: tabs.length,
         open_count: tabs.filter((tab: any) => tab.status === "open").length,
         total_balance_due: roundMoney(
-          tabs.reduce((sum: number, tab: any) => sum + Number(tab.balance_due || 0), 0)
+          tabs.reduce(
+            (sum: number, tab: any) => sum + Number(tab.balance_due || 0),
+            0,
+          ),
         ),
         total_grand_total: roundMoney(
-          tabs.reduce((sum: number, tab: any) => sum + Number(tab.grand_total || 0), 0)
+          tabs.reduce(
+            (sum: number, tab: any) => sum + Number(tab.grand_total || 0),
+            0,
+          ),
         ),
         total_amount_paid: roundMoney(
-          tabs.reduce((sum: number, tab: any) => sum + Number(tab.amount_paid || 0), 0)
+          tabs.reduce(
+            (sum: number, tab: any) => sum + Number(tab.amount_paid || 0),
+            0,
+          ),
         ),
       },
       tabs,
@@ -2562,8 +2983,8 @@ app.get("/api/admin/list-open-tabs", async (req, res) => {
           stack: error?.stack || null,
         },
         null,
-        2
-      )
+        2,
+      ),
     );
 
     return res.status(500).json({
@@ -2656,7 +3077,7 @@ app.post("/api/admin/add-line-item", async (req, res) => {
         tax_exempt_override: taxExemptOverride,
         line_total: lineTotal,
       },
-      "admin"
+      "admin",
     );
 
     return res.json({
@@ -2684,8 +3105,8 @@ app.post("/api/admin/add-line-item", async (req, res) => {
           stack: error?.stack || null,
         },
         null,
-        2
-      )
+        2,
+      ),
     );
 
     return res.status(500).json({
@@ -2752,7 +3173,7 @@ app.post("/api/admin/add-payment", async (req, res) => {
         amount: roundMoney(amount),
         status,
       },
-      "admin"
+      "admin",
     );
 
     return res.json({
@@ -2765,7 +3186,9 @@ app.post("/api/admin/add-payment", async (req, res) => {
     });
   } catch (error: any) {
     console.error("POST /api/admin/add-payment failed", error);
-    return res.status(500).json({ error: error?.message || "Failed to add payment" });
+    return res
+      .status(500)
+      .json({ error: error?.message || "Failed to add payment" });
   }
 });
 
@@ -2795,9 +3218,15 @@ app.post("/api/admin/update-tab-status", async (req, res) => {
       .from("tabs")
       .update({
         status,
-        closed_at: status === "closed" || status === "void" ? new Date().toISOString() : null,
+        closed_at:
+          status === "closed" || status === "void"
+            ? new Date().toISOString()
+            : null,
         notes: payload.note?.trim()
-          ? appendNote(existing.notes, `[STATUS ${status.toUpperCase()}] ${payload.note.trim()}`)
+          ? appendNote(
+              existing.notes,
+              `[STATUS ${status.toUpperCase()}] ${payload.note.trim()}`,
+            )
           : existing.notes,
       })
       .eq("id", payload.tab_id)
@@ -2817,7 +3246,7 @@ app.post("/api/admin/update-tab-status", async (req, res) => {
         status,
         note: payload.note?.trim() || null,
       },
-      "admin"
+      "admin",
     );
 
     return res.json({
@@ -2834,7 +3263,9 @@ app.post("/api/admin/update-tab-status", async (req, res) => {
     });
   } catch (error: any) {
     console.error("POST /api/admin/update-tab-status failed", error);
-    return res.status(500).json({ error: error?.message || "Failed to update tab status" });
+    return res
+      .status(500)
+      .json({ error: error?.message || "Failed to update tab status" });
   }
 });
 
@@ -2872,7 +3303,7 @@ app.post("/api/admin/void-line-item", async (req, res) => {
         line_total: 0,
         note: appendNote(
           appendNote(existing.note, "[VOID LINE ITEM]"),
-          payload.note?.trim() || ""
+          payload.note?.trim() || "",
         ),
       })
       .eq("id", payload.line_item_id)
@@ -2894,7 +3325,7 @@ app.post("/api/admin/void-line-item", async (req, res) => {
         line_item_id: payload.line_item_id,
         note: payload.note?.trim() || null,
       },
-      "admin"
+      "admin",
     );
 
     return res.json({
@@ -2912,7 +3343,9 @@ app.post("/api/admin/void-line-item", async (req, res) => {
     });
   } catch (error: any) {
     console.error("POST /api/admin/void-line-item failed", error);
-    return res.status(500).json({ error: error?.message || "Failed to void line item" });
+    return res
+      .status(500)
+      .json({ error: error?.message || "Failed to void line item" });
   }
 });
 
@@ -2946,7 +3379,7 @@ app.post("/api/admin/void-payment", async (req, res) => {
         status: "void",
         note: appendNote(
           appendNote(existing.note, "[VOID PAYMENT]"),
-          payload.note?.trim() || ""
+          payload.note?.trim() || "",
         ),
       })
       .eq("id", payload.payment_id)
@@ -2968,7 +3401,7 @@ app.post("/api/admin/void-payment", async (req, res) => {
         payment_id: payload.payment_id,
         note: payload.note?.trim() || null,
       },
-      "admin"
+      "admin",
     );
 
     return res.json({
@@ -2981,7 +3414,9 @@ app.post("/api/admin/void-payment", async (req, res) => {
     });
   } catch (error: any) {
     console.error("POST /api/admin/void-payment failed", error);
-    return res.status(500).json({ error: error?.message || "Failed to void payment" });
+    return res
+      .status(500)
+      .json({ error: error?.message || "Failed to void payment" });
   }
 });
 
@@ -2996,12 +3431,22 @@ app.post("/api/book", async (req, res) => {
 
     const payload = req.body as BookingPayload;
 
-    if (!payload?.date || !payload?.time || !payload?.throwers || !payload?.customer) {
+    if (
+      !payload?.date ||
+      !payload?.time ||
+      !payload?.throwers ||
+      !payload?.customer
+    ) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    if (!payload.customer.first_name?.trim() || !payload.customer.last_name?.trim()) {
-      return res.status(400).json({ error: "Customer first and last name are required" });
+    if (
+      !payload.customer.first_name?.trim() ||
+      !payload.customer.last_name?.trim()
+    ) {
+      return res
+        .status(400)
+        .json({ error: "Customer first and last name are required" });
     }
 
     const date = normalizeDate(payload.date);
@@ -3025,19 +3470,24 @@ app.post("/api/book", async (req, res) => {
       const age = bookingDate.getFullYear() - birthDate.getFullYear();
       if (age < 8) {
         return res.status(400).json({
-          error: "Guests under 8 are not eligible for standard axe throwing booking.",
+          error:
+            "Guests under 8 are not eligible for standard axe throwing booking.",
         });
       }
     }
 
     const timeBlock = await getTimeBlock(date, time);
     if (!timeBlock || !timeBlock.is_open || !timeBlock.is_bookable) {
-      return res.status(400).json({ error: "Invalid or unavailable time slot" });
+      return res
+        .status(400)
+        .json({ error: "Invalid or unavailable time slot" });
     }
 
     const capacity = await getCapacityRowForBlock(timeBlock.id);
     if (!capacity) {
-      return res.status(400).json({ error: "Capacity record not found for slot" });
+      return res
+        .status(400)
+        .json({ error: "Capacity record not found for slot" });
     }
 
     const { preferred, minimum } = computeBayRequirements(throwers);
@@ -3066,7 +3516,9 @@ app.post("/api/book", async (req, res) => {
     const rawFrontendUrl = String(process.env.FRONTEND_URL || "").trim();
     if (!rawFrontendUrl) {
       console.error("Missing FRONTEND_URL");
-      return res.status(500).json({ error: "Booking frontend URL is not configured" });
+      return res
+        .status(500)
+        .json({ error: "Booking frontend URL is not configured" });
     }
 
     let frontendBase: string;
@@ -3135,7 +3587,9 @@ app.post("/api/book", async (req, res) => {
 
         if (addonInsertError) {
           console.error("booking_addons insert failed", addonInsertError);
-          return res.status(500).json({ error: "Booking add-on insert failed" });
+          return res
+            .status(500)
+            .json({ error: "Booking add-on insert failed" });
         }
       }
     }
@@ -3285,7 +3739,8 @@ app.post("/api/admin/send-thank-you-emails", async (req, res) => {
     const { data: bookings, error } = await supabase
       .schema("texaxes")
       .from("bookings")
-      .select(`
+      .select(
+        `
         id,
         customer_id,
         thank_you_email_scheduled_for,
@@ -3294,7 +3749,8 @@ app.post("/api/admin/send-thank-you-emails", async (req, res) => {
           email,
           first_name
         )
-      `)
+      `,
+      )
       .not("thank_you_email_scheduled_for", "is", null)
       .is("thank_you_email_sent_at", null)
       .lte("thank_you_email_scheduled_for", nowIso);
@@ -3312,35 +3768,35 @@ app.post("/api/admin/send-thank-you-emails", async (req, res) => {
     let sentCount = 0;
 
     // 2. Process each booking
-for (const booking of bookings) {
-  const customer = Array.isArray(booking.customers)
-    ? booking.customers[0]
-    : booking.customers;
+    for (const booking of bookings) {
+      const customer = Array.isArray(booking.customers)
+        ? booking.customers[0]
+        : booking.customers;
 
-  const email = customer?.email?.trim();
-  const firstName = customer?.first_name || "there";
+      const email = customer?.email?.trim();
+      const firstName = customer?.first_name || "there";
 
-  if (!email) {
-    continue; // skip if no email
-  }
+      if (!email) {
+        continue; // skip if no email
+      }
 
-  try {
-    const emailContent = buildThankYouEmail({
-      firstName,
-      couponCode: "THANKYOU20",
-      discountLabel: "20% off",
-      validDays: 30,
-    });
+      try {
+        const emailContent = buildThankYouEmail({
+          firstName,
+          couponCode: "THANKYOU20",
+          discountLabel: "20% off",
+          validDays: 30,
+        });
 
-    const { error: sendError } = await resend.emails.send({
-      from: WAIVER_FROM_EMAIL,
-      to: email,
-      subject: emailContent.subject,
-      text: emailContent.text,
-      html: emailContent.html,
-    });
+        const { error: sendError } = await resend.emails.send({
+          from: WAIVER_FROM_EMAIL,
+          to: email,
+          subject: emailContent.subject,
+          text: emailContent.text,
+          html: emailContent.html,
+        });
 
-          if (sendError) {
+        if (sendError) {
           console.error("Thank-you email failed", sendError);
           continue;
         }
@@ -3368,7 +3824,7 @@ for (const booking of bookings) {
             booking_id: booking.id,
             email,
           },
-          "system"
+          "system",
         );
 
         sentCount++;
